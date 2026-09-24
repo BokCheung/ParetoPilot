@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "example-multitask-ranking",
+  "dtype": "fp16",
+  "dense_features": 32,
+  "embeddings": [
+    {"name": "user_id", "vocab_size": 100000, "dim": 64},
+    {"name": "item_id", "vocab_size": 200000, "dim": 64},
+    {"name": "category", "vocab_size": 10000, "dim": 32}
+  ],
+  "dense_mlp": [128, 64],
+  "interaction": {"kind": "dot", "projection_dim": 64},
+  "sequence_encoder": null,
+  "towers": [
+    {"name": "ctr", "hidden_sizes": [128, 64], "output_dim": 1},
+    {"name": "cvr", "hidden_sizes": [64, 32], "output_dim": 1}
+  ]
+}

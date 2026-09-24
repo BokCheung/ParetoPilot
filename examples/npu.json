@@ -1,0 +1,18 @@
+{
+  "name": "synthetic-npu-example-not-a-product-spec",
+  "compute_tops": {
+    "fp16": {"matrix": 64, "vector": 2},
+    "bf16": {"matrix": 64, "vector": 2},
+    "fp32": {"matrix": 16, "vector": 1},
+    "int8": {"matrix": 128, "vector": 4}
+  },
+  "memory_bandwidth_gbps": 256,
+  "memory_capacity_bytes": 8589934592,
+  "on_chip_memory_bytes": 4194304,
+  "on_chip_bandwidth_gbps": 2048,
+  "matrix_alignment": 16,
+  "compute_efficiency": 1,
+  "bandwidth_efficiency": 1,
+  "random_access_efficiency": 1,
+  "launch_overhead_us": 0
+}

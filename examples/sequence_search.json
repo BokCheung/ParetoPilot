@@ -1,0 +1,12 @@
+{
+  "method": "adaptive",
+  "seed": 7,
+  "max_evaluations": 30,
+  "parameters": {
+    "sequence_encoder.hidden_size": [48, 64, 96],
+    "sequence_encoder.num_heads": [2, 4, 8],
+    "sequence_encoder.ffn_size": [96, 128, 192],
+    "sequence_encoder.num_layers": [1, 2, 3]
+  },
+  "constraints": {"parameter_ratio": [0.9, 1.1]}
+}

@@ -1,0 +1,6 @@
+{
+  "batch_size": 128,
+  "lookups_per_sample": {"user_id": 1, "item_id": 1, "category": 4},
+  "sequence_length": 0,
+  "embedding_cache_hit_rate": 0
+}

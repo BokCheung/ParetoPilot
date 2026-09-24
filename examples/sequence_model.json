@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "example-behavior-sequence-ranking",
+  "dtype": "fp16",
+  "dense_features": 16,
+  "embeddings": [{"name": "item_id", "vocab_size": 50000, "dim": 32}],
+  "dense_mlp": [64],
+  "interaction": {"kind": "concat"},
+  "sequence_encoder": {
+    "vocab_size": 50000,
+    "embedding_dim": 32,
+    "hidden_size": 64,
+    "num_heads": 4,
+    "ffn_size": 128,
+    "num_layers": 2
+  },
+  "towers": [{"name": "ctr", "hidden_sizes": [64, 32], "output_dim": 1}]
+}

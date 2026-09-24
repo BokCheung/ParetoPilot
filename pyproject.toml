@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paretopilot"
+version = "0.1.0"
+description = "Roofline-guided structure search for recommendation models on NPUs"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+paretopilot = "paretopilot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["paretopilot*"]
