@@ -14,6 +14,7 @@ class Tensor:
     shape: tuple
     element_bytes: int
     external: bool = False
+    alias_of: str | None = None
 
     @property
     def size_bytes(self):
@@ -29,7 +30,6 @@ class Operator:
     useful_ops: int
     parameter_bytes_read: int = 0
     matrix: tuple | None = None  # groups, M, K, N
-    lookup_bytes: int = 0
 
 
 @dataclass
@@ -50,27 +50,35 @@ class Graph:
 
     def peak_activation_bytes(self):
         """Sequential execution, out-of-place outputs, exact tensor last-use release."""
-        uses = {key: 0 for key in self.tensors}
+        def storage(key):
+            while self.tensors[key].alias_of is not None:
+                key = self.tensors[key].alias_of
+            return key
+
+        uses = {storage(key): 0 for key in self.tensors}
         for op in self.operators:
             for key in op.inputs:
-                uses[key] += 1
+                uses[storage(key)] += 1
         for key in self.outputs:
-            uses[key] += 1  # returned predictions stay live
-        live = {key for key, tensor in self.tensors.items() if tensor.external and uses[key]}
+            uses[storage(key)] += 1  # returned predictions stay live
+        live = {storage(key) for key, tensor in self.tensors.items() if tensor.external and uses[storage(key)]}
         current = sum(self.tensors[key].size_bytes for key in live)
         peak = current
         for op in self.operators:
-            live.add(op.output)
-            current += self.tensors[op.output].size_bytes
+            output = storage(op.output)
+            if output not in live:
+                live.add(output)
+                current += self.tensors[output].size_bytes
             peak = max(peak, current)
             for key in op.inputs:
+                key = storage(key)
                 uses[key] -= 1
                 if uses[key] == 0 and key in live:
                     current -= self.tensors[key].size_bytes
                     live.remove(key)
-            if uses[op.output] == 0:
-                current -= self.tensors[op.output].size_bytes
-                live.remove(op.output)
+            if uses[output] == 0 and output in live:
+                current -= self.tensors[output].size_bytes
+                live.remove(output)
         return peak
 
 
@@ -90,9 +98,9 @@ class Builder:
         self.graph.parameters[name] = count
         return count * self.graph.element_bytes
 
-    def op(self, name, kind, inputs, shape, ops=0, param_bytes=0, matrix=None, lookup_bytes=0):
+    def op(self, name, kind, inputs, shape, ops=0, param_bytes=0, matrix=None):
         output = self.tensor(name + ".out", shape)
-        self.graph.operators.append(Operator(name, kind, inputs, output, ops, param_bytes, matrix, lookup_bytes))
+        self.graph.operators.append(Operator(name, kind, inputs, output, ops, param_bytes, matrix))
         return output
 
     def linear(self, name, x, width):
@@ -114,15 +122,10 @@ class Builder:
             x = self.elementwise(f"{name}.{i}.relu", "relu", x)
         return x
 
-    def lookup(self, name, vocab, dim, length):
-        self.parameter(name + ".table", vocab * dim)
-        ids = self.tensor(name + ".ids", (self.b, length), external=True, element_bytes=8)
-        return self.op(name, "embedding", [ids], (self.b, length, dim),
-                       lookup_bytes=self.b * length * dim * self.graph.element_bytes)
-
-    def pool(self, name, x):
+    def pool(self, name, x, kind="mean"):
         b, length, dim = self.graph.tensors[x].shape
-        return self.op(name, "mean", [x], (b, dim), b * length * dim)
+        operations = b * dim * (length if kind == "mean" else max(0, length - 1))
+        return self.op(name, kind, [x], (b, dim), operations)
 
     def concat(self, name, xs):
         if len(xs) == 1:
@@ -134,7 +137,7 @@ class Builder:
         length = self.workload["sequence_length"]
         hidden, heads = seq["hidden_size"], seq["num_heads"]
         head_dim = hidden // heads
-        x = self.lookup("sequence.embedding", seq["vocab_size"], seq["embedding_dim"], length)
+        x = self.tensor("sequence.input", (self.b, length, seq["embedding_dim"]), external=True)
         if seq["embedding_dim"] != hidden:
             x = self.linear("sequence.input_projection", x, hidden)
         for layer in range(seq["num_layers"]):
@@ -164,11 +167,16 @@ class Builder:
         if m["dense_features"]:
             dense = self.tensor("dense.input", (self.b, m["dense_features"]), external=True)
             features.append(self.mlp("dense", dense, m["dense_mlp"]))
-        for index, e in enumerate(m["embeddings"]):
+        for index, e in enumerate(m["embedding_inputs"]):
             # Use stable numeric IDs internally; user feature names can contain punctuation.
-            prefix = f"embedding.{index}"
-            x = self.lookup(prefix, e["vocab_size"], e["dim"], self.workload["lookups_per_sample"][e["name"]])
-            features.append(self.pool(prefix + ".pool", x))
+            prefix = f"embedding_input.{index}"
+            if e["pooling"] == "none":
+                x = self.tensor(prefix, (self.b, e["dim"]), external=True)
+            else:
+                length = self.workload["embedding_lengths"][e["name"]]
+                x = self.tensor(prefix, (self.b, length, e["dim"]), external=True)
+                x = self.pool(prefix + ".pool", x, e["pooling"])
+            features.append(x)
         if m["sequence_encoder"]:
             features.append(self.sequence(m["sequence_encoder"]))
         if m["interaction"]["kind"] == "dot":

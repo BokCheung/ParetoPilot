@@ -1,12 +1,12 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "example-multitask-ranking",
   "dtype": "fp16",
   "dense_features": 32,
-  "embeddings": [
-    {"name": "user_id", "vocab_size": 100000, "dim": 64},
-    {"name": "item_id", "vocab_size": 200000, "dim": 64},
-    {"name": "category", "vocab_size": 10000, "dim": 32}
+  "embedding_inputs": [
+    {"name": "user_id", "dim": 64, "pooling": "none"},
+    {"name": "item_id", "dim": 64, "pooling": "none"},
+    {"name": "category", "dim": 32, "pooling": "sum"}
   ],
   "dense_mlp": [128, 64],
   "interaction": {"kind": "dot", "projection_dim": 64},

@@ -4,8 +4,6 @@
   "max_evaluations": 40,
   "exploration_probability": 0.25,
   "parameters": {
-    "embeddings.0.dim": [48, 64, 80],
-    "embeddings.1.dim": [48, 64, 80],
     "dense_mlp": [[64], [128, 64], [128, 128, 64]],
     "interaction": [{"kind": "concat"}, {"kind": "dot", "projection_dim": 32}, {"kind": "dot", "projection_dim": 64}],
     "towers.0.hidden_sizes": [[64, 32], [128, 64], [192, 64]],

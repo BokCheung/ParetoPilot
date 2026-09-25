@@ -10,8 +10,9 @@ from pathlib import Path
 
 
 DTYPE_BYTES = {"fp32": 4, "fp16": 2, "bf16": 2, "int8": 1}
-OPS = {"embedding", "matmul", "relu", "concat", "gather", "softmax",
-       "add", "layernorm", "mean", "sigmoid"}
+OPS = {"matmul", "relu", "concat", "gather", "softmax",
+       "add", "layernorm", "mean", "sum", "sigmoid", "multiply",
+       "subtract", "divide", "log", "floor", "dice", "tanh"}
 
 
 class ConfigError(ValueError):
@@ -83,28 +84,43 @@ def sizes(value, path):
 
 def validate_model(value):
     m = copy.deepcopy(value)
-    fields = {"schema_version", "name", "dtype", "dense_features", "embeddings", "dense_mlp",
+    fields = {"schema_version", "name", "dtype", "dense_features", "embeddings", "embedding_inputs", "dense_mlp",
               "interaction", "sequence_encoder", "towers"}
-    obj(m, fields, {"name", "dtype", "dense_features", "embeddings", "towers"}, "model")
-    m.setdefault("schema_version", 1)
-    if type(m["schema_version"]) is not int or m["schema_version"] != 1:
-        raise ConfigError("model.schema_version: only version 1 is supported")
+    obj(m, fields, {"name", "dtype", "dense_features", "towers"}, "model")
+    version = m.get("schema_version", 1 if "embeddings" in m else 2)
+    if type(version) is not int or version not in (1, 2):
+        raise ConfigError("model.schema_version: expected 1 (legacy) or 2 (post-SFPS inputs)")
+    if "embeddings" in m and "embedding_inputs" in m:
+        raise ConfigError("Use embedding_inputs or legacy embeddings, not both")
+    if version == 2 and "embeddings" in m:
+        raise ConfigError("schema_version 2 uses embedding_inputs with name, dim and pooling")
+    # Legacy table descriptions become tensor inputs. SFPS metadata is not retained
+    # in normalized configurations, candidate hashes or model parameter counts.
+    legacy = "embeddings" in m
+    inputs = m.pop("embeddings") if legacy else m.get("embedding_inputs", [])
+    m["embedding_inputs"] = inputs
+    m["schema_version"] = 2
     name(m["name"], "model.name")
     if not isinstance(m["dtype"], str) or m["dtype"] not in DTYPE_BYTES:
         raise ConfigError(f"model.dtype: expected one of {sorted(DTYPE_BYTES)}")
     integer(m["dense_features"], "model.dense_features", 0)
-    if not isinstance(m["embeddings"], list):
-        raise ConfigError("model.embeddings: expected list")
+    if not isinstance(inputs, list):
+        raise ConfigError("model.embedding_inputs: expected list")
     seen = set()
-    for i, e in enumerate(m["embeddings"]):
-        p = f"model.embeddings[{i}]"
-        obj(e, {"name", "vocab_size", "dim"}, {"name", "vocab_size", "dim"}, p)
+    for i, e in enumerate(inputs):
+        p = f"model.embedding_inputs[{i}]"
+        fields = {"name", "dim", "pooling"} | ({"vocab_size"} if legacy else set())
+        obj(e, fields, {"name", "dim"}, p)
         name(e["name"], p + ".name")
         if e["name"] in seen:
-            raise ConfigError(f"{p}: duplicate embedding name")
+            raise ConfigError(f"{p}: duplicate input name")
         seen.add(e["name"])
-        integer(e["vocab_size"], p + ".vocab_size")
+        if "vocab_size" in e:
+            integer(e.pop("vocab_size"), p + ".vocab_size")
         integer(e["dim"], p + ".dim")
+        e.setdefault("pooling", "mean")
+        if e["pooling"] not in ("mean", "sum", "none"):
+            raise ConfigError(f"{p}.pooling: expected mean, sum or none")
     m.setdefault("dense_mlp", [])
     sizes(m["dense_mlp"], "model.dense_mlp")
     if m["dense_mlp"] and not m["dense_features"]:
@@ -123,13 +139,15 @@ def validate_model(value):
     m.setdefault("sequence_encoder", None)
     seq = m["sequence_encoder"]
     if seq is not None:
-        fields = {"vocab_size", "embedding_dim", "hidden_size", "num_heads", "ffn_size", "num_layers"}
-        obj(seq, fields, fields, "model.sequence_encoder")
+        fields = {"embedding_dim", "hidden_size", "num_heads", "ffn_size", "num_layers"}
+        obj(seq, fields | ({"vocab_size"} if version == 1 else set()), fields, "model.sequence_encoder")
+        if "vocab_size" in seq:
+            integer(seq.pop("vocab_size"), "model.sequence_encoder.vocab_size")
         for key, val in seq.items():
             integer(val, "model.sequence_encoder." + key)
         if seq["hidden_size"] % seq["num_heads"]:
             raise ConfigError("sequence hidden_size must be divisible by num_heads")
-    if not (m["dense_features"] or m["embeddings"] or seq):
+    if not (m["dense_features"] or inputs or seq):
         raise ConfigError("model needs at least one input feature")
     if not isinstance(m["towers"], list) or not m["towers"]:
         raise ConfigError("model.towers: expected nonempty list")
@@ -163,42 +181,57 @@ def validate_npu(value):
             number(rate, f"npu.compute_tops.{dtype}.{engine}", positive=True)
     number(n["memory_bandwidth_gbps"], "npu.memory_bandwidth_gbps", positive=True)
     integer(n["memory_capacity_bytes"], "npu.memory_capacity_bytes")
-    defaults = {"on_chip_memory_bytes": 0, "on_chip_bandwidth_gbps": 0,
-                "matrix_alignment": 1, "compute_efficiency": 1.0, "bandwidth_efficiency": 1.0,
-                "random_access_efficiency": 1.0, "launch_overhead_us": 0.0, "supported_ops": sorted(OPS)}
+    defaults = {"matrix_alignment": 1, "compute_efficiency": 1.0, "bandwidth_efficiency": 1.0,
+                "launch_overhead_us": 0.0, "supported_ops": sorted(OPS)}
     for key, default in defaults.items():
         n.setdefault(key, default)
-    integer(n["on_chip_memory_bytes"], "npu.on_chip_memory_bytes", 0)
+    # Compatibility only: these formerly controlled SFPS lookup/cache evaluation.
+    # There is no lookup or hierarchical SRAM model in the post-SFPS evaluator.
+    if "on_chip_memory_bytes" in n:
+        integer(n.pop("on_chip_memory_bytes"), "npu.on_chip_memory_bytes", 0)
+    if "on_chip_bandwidth_gbps" in n:
+        number(n.pop("on_chip_bandwidth_gbps"), "npu.on_chip_bandwidth_gbps")
+    if "random_access_efficiency" in n:
+        number(n.pop("random_access_efficiency"), "npu.random_access_efficiency", maximum=1, positive=True)
     integer(n["matrix_alignment"], "npu.matrix_alignment")
-    number(n["on_chip_bandwidth_gbps"], "npu.on_chip_bandwidth_gbps")
-    for key in ("compute_efficiency", "bandwidth_efficiency", "random_access_efficiency"):
+    for key in ("compute_efficiency", "bandwidth_efficiency"):
         number(n[key], "npu." + key, maximum=1, positive=True)
     number(n["launch_overhead_us"], "npu.launch_overhead_us")
     supported = n["supported_ops"]
-    if not isinstance(supported, list) or any(not isinstance(op, str) or op not in OPS for op in supported):
+    if not isinstance(supported, list) or any(not isinstance(op, str) or op not in OPS | {"embedding"} for op in supported):
         raise ConfigError(f"npu.supported_ops: expected subset of {sorted(OPS)}")
+    n["supported_ops"] = [op for op in supported if op != "embedding"]
     return n
 
 
 def validate_workload(value, model, npu):
     w = copy.deepcopy(value)
-    obj(w, {"batch_size", "lookups_per_sample", "sequence_length", "embedding_cache_hit_rate"},
-        {"batch_size", "lookups_per_sample"}, "workload")
+    obj(w, {"batch_size", "embedding_lengths", "lookups_per_sample", "sequence_length", "embedding_cache_hit_rate"},
+        {"batch_size"}, "workload")
     integer(w["batch_size"], "workload.batch_size")
-    keys = {e["name"] for e in model["embeddings"]}
-    obj(w["lookups_per_sample"], keys, keys, "workload.lookups_per_sample")
-    for key, val in w["lookups_per_sample"].items():
-        integer(val, "workload.lookups_per_sample." + key)
+    if "lookups_per_sample" in w:
+        if "embedding_lengths" in w:
+            raise ConfigError("Use embedding_lengths or legacy lookups_per_sample, not both")
+        w["embedding_lengths"] = w.pop("lookups_per_sample")
+    w.setdefault("embedding_lengths", {})
+    keys = {e["name"] for e in model["embedding_inputs"]}
+    required = {e["name"] for e in model["embedding_inputs"] if e["pooling"] != "none"}
+    obj(w["embedding_lengths"], keys, required, "workload.embedding_lengths")
+    for key, val in w["embedding_lengths"].items():
+        integer(val, "workload.embedding_lengths." + key)
+    for e in model["embedding_inputs"]:
+        if e["pooling"] == "none":
+            if w["embedding_lengths"].get(e["name"], 1) != 1:
+                raise ConfigError(f"{e['name']}: pooling=none expects one ready vector per sample")
+            w["embedding_lengths"][e["name"]] = 1
     w.setdefault("sequence_length", 0)
-    w.setdefault("embedding_cache_hit_rate", 0.0)
+    if "embedding_cache_hit_rate" in w:
+        number(w.pop("embedding_cache_hit_rate"), "workload.embedding_cache_hit_rate", maximum=1)
     integer(w["sequence_length"], "workload.sequence_length", 0)
-    number(w["embedding_cache_hit_rate"], "workload.embedding_cache_hit_rate", maximum=1)
     if model["sequence_encoder"] is not None and w["sequence_length"] == 0:
         raise ConfigError("sequence encoder requires sequence_length > 0")
     if model["sequence_encoder"] is None and w["sequence_length"] != 0:
         raise ConfigError("sequence_length must be 0 without sequence encoder")
-    if w["embedding_cache_hit_rate"] and not (npu["on_chip_memory_bytes"] and npu["on_chip_bandwidth_gbps"]):
-        raise ConfigError("embedding cache hits require on-chip capacity and bandwidth")
     if model["dtype"] not in npu["compute_tops"]:
         raise ConfigError(f"npu has no throughput for dtype {model['dtype']}")
     return w
@@ -243,7 +276,7 @@ def validate_search(value, model):
     number(s["exploration_probability"], "search.exploration_probability", maximum=1)
     if not isinstance(s["parameters"], dict) or not s["parameters"]:
         raise ConfigError("search.parameters: expected nonempty object")
-    allowed = r"(?:dense_mlp|embeddings\.\d+\.dim|towers\.\d+\.hidden_sizes|interaction|sequence_encoder\.(?:embedding_dim|hidden_size|num_heads|ffn_size|num_layers))"
+    allowed = r"(?:dense_mlp|towers\.\d+\.hidden_sizes|interaction|sequence_encoder\.(?:hidden_size|num_heads|ffn_size|num_layers))"
     for path, choices in s["parameters"].items():
         if not re.fullmatch(allowed, path):
             raise ConfigError(f"search path is not a mutable structure field: {path}")

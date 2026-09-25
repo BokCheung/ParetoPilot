@@ -1,13 +1,12 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "example-behavior-sequence-ranking",
   "dtype": "fp16",
   "dense_features": 16,
-  "embeddings": [{"name": "item_id", "vocab_size": 50000, "dim": 32}],
+  "embedding_inputs": [{"name": "item_id", "dim": 32, "pooling": "none"}],
   "dense_mlp": [64],
   "interaction": {"kind": "concat"},
   "sequence_encoder": {
-    "vocab_size": 50000,
     "embedding_dim": 32,
     "hidden_size": 64,
     "num_heads": 4,

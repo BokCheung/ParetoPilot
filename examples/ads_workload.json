@@ -1,0 +1,109 @@
+{
+  "description": "SYNTHETIC DEMO: region membership is illustrative; sequence length 20, scalar length 1, two continuous features per dense region. Replace with production tensor shapes and regions.",
+  "synthetic": true,
+  "batch_size": 128,
+  "dtype": "fp16",
+  "ready_features": [
+    {"name": "advertiser_id", "shape": [1, 16], "region": ["cross_goods_sence"]},
+    {"name": "app_class2", "shape": [1, 16], "region": ["cross_sence_sence"]},
+    {"name": "app_class3", "shape": [1, 16], "region": ["cross_user_goods"]},
+    {"name": "app_id", "shape": [1, 16], "region": ["cross_user_sence"]},
+    {"name": "auid", "shape": [1, 16], "region": ["goods_prom"]},
+    {"name": "auid__crtv_clstid_stream", "shape": [1, 16], "region": ["sence_env"]},
+    {"name": "auid__site_app_pkg", "shape": [1, 16], "region": ["sence_media"]},
+    {"name": "auid__site_id", "shape": [1, 16], "region": ["sence_slot"]},
+    {"name": "auid__slot_id", "shape": [1, 16], "region": ["user_ad_behavior"]},
+    {"name": "auid__task_id", "shape": [1, 16], "region": ["user_ad_behavior_cross"]},
+    {"name": "auid_clk_advrid_dts_ubd_list", "shape": [20, 16], "region": ["user_ad_behavior_goods"]},
+    {"name": "auid_clk_hour_crtv_ubd_list", "shape": [20, 16], "region": ["user_ad_behavior_sence"]},
+    {"name": "auid_clk_siteid_dts_ubd_list", "shape": [20, 16], "region": ["user_app_behavior"]},
+    {"name": "auid_clk_slotid_crtv_ubd_list", "shape": [20, 40], "region": ["user_attribute"]},
+    {"name": "auid_clk_slotid_dts_ubd_list", "shape": [20, 40], "region": ["user_search_behavior"]},
+    {"name": "auid_hwdsp_clk_slotid_dts_ubd_list", "shape": [20, 40], "region": ["cross_goods_sence"]},
+    {"name": "auid_hwdsp_clk_taskid_tfidf_list_180d", "shape": [20, 40], "region": ["cross_sence_sence"]},
+    {"name": "auid_hwdsp_cls_slotid_dts_ubd_list", "shape": [20, 40], "region": ["cross_user_goods"]},
+    {"name": "auid_hwdsp_imp_slotid_dfq_top8_30d", "shape": [20, 40], "region": ["cross_user_sence"]},
+    {"name": "auid_imp_no_clk_slotid_dts_ubd_list", "shape": [20, 40], "region": ["goods_prom"]},
+    {"name": "auid_query_tag2_dfq_top10_30d_list", "shape": [20, 16], "region": ["sence_env"]},
+    {"name": "auid_query_tag2_dfq_top5_15d_list", "shape": [20, 16], "region": ["sence_media"]},
+    {"name": "auid_query_tag2_dfq_top5_30d_list", "shape": [20, 16], "region": ["sence_slot"]},
+    {"name": "auid_query_tag2_dfq_top5_3d_list", "shape": [20, 16], "region": ["user_ad_behavior"]},
+    {"name": "auid_query_tag2_dfq_top5_7d_list", "shape": [20, 16], "region": ["user_ad_behavior_cross"]},
+    {"name": "auid_query_tag3_dfq_top15_30d_list", "shape": [20, 16], "region": ["user_ad_behavior_goods"]},
+    {"name": "auid_query_tag3_dfq_top5_30d_list", "shape": [20, 16], "region": ["user_ad_behavior_sence"]},
+    {"name": "auid_query_tag3_dfq_top5_3d_list", "shape": [20, 16], "region": ["user_app_behavior"]},
+    {"name": "creativetype", "shape": [1, 16], "region": ["user_attribute"]},
+    {"name": "crtv_clstid_stream", "shape": [1, 16], "region": ["user_search_behavior"]},
+    {"name": "crtv_clstid_stream__site_id", "shape": [1, 16], "region": ["cross_goods_sence"]},
+    {"name": "hour_of_day", "shape": [1, 16], "region": ["cross_sence_sence"]},
+    {"name": "media_type_new", "shape": [1, 16], "region": ["cross_user_goods"]},
+    {"name": "rt_auid_noclick_slot_list_12h", "shape": [20, 40], "region": ["cross_user_sence"]},
+    {"name": "rt_auid_noclick_slot_list_7d", "shape": [20, 40], "region": ["goods_prom"]},
+    {"name": "rt_auid_noinstall_slot_list_cnt_24h", "shape": [20, 40], "region": ["sence_env"]},
+    {"name": "rt_auid_show_creativetype_list_cnt_7d", "shape": [20, 16], "region": ["sence_media"]},
+    {"name": "rt_auid_show_slot_list_12h", "shape": [20, 40], "region": ["sence_slot"]},
+    {"name": "site_app_pkg", "shape": [1, 16], "region": ["user_ad_behavior"]},
+    {"name": "site_app_pkg__crtv_clstid_stream", "shape": [1, 16], "region": ["user_ad_behavior_cross"]},
+    {"name": "site_app_pkg__task_id", "shape": [1, 16], "region": ["user_ad_behavior_goods"]},
+    {"name": "site_id", "shape": [1, 16], "region": ["user_ad_behavior_sence"]},
+    {"name": "site_paid_hour_top3_30d", "shape": [20, 16], "region": ["user_app_behavior"]},
+    {"name": "site_register_hour_top_30d", "shape": [20, 16], "region": ["user_attribute"]},
+    {"name": "slot_id", "shape": [1, 24], "region": ["user_search_behavior"]},
+    {"name": "slot_id__crtv_clstid_stream", "shape": [1, 16], "region": ["cross_goods_sence"]},
+    {"name": "slot_id__task_id", "shape": [1, 16], "region": ["cross_sence_sence"]},
+    {"name": "task_id", "shape": [1, 16], "region": ["cross_user_goods"]},
+    {"name": "task_id__site_id", "shape": [1, 16], "region": ["cross_user_sence"]}
+  ],
+  "dense_features": [
+    {"name": "demo_sence_slot_0", "shape": [1], "region": ["sence_slot"]},
+    {"name": "demo_sence_slot_1", "shape": [1], "region": ["sence_slot"]},
+    {"name": "demo_sence_media_0", "shape": [1], "region": ["sence_media"]},
+    {"name": "demo_sence_media_1", "shape": [1], "region": ["sence_media"]},
+    {"name": "demo_user_attribute_0", "shape": [1], "region": ["user_attribute"]},
+    {"name": "demo_user_attribute_1", "shape": [1], "region": ["user_attribute"]},
+    {"name": "demo_user_ad_behavior_cross_0", "shape": [1], "region": ["user_ad_behavior_cross"]},
+    {"name": "demo_user_ad_behavior_cross_1", "shape": [1], "region": ["user_ad_behavior_cross"]},
+    {"name": "demo_user_ad_behavior_0", "shape": [1], "region": ["user_ad_behavior"]},
+    {"name": "demo_user_ad_behavior_1", "shape": [1], "region": ["user_ad_behavior"]}
+  ],
+  "module_options": {
+    "log_dense": {
+      "bucket_ops": 5
+    },
+    "din": {
+      "normalize_weights": false,
+      "use_bias": true
+    },
+    "din_v2": {
+      "normalize_weights": false,
+      "use_bias": true
+    },
+    "ads_can": {
+      "hidden_sizes": [
+        3
+      ],
+      "activation": "tanh"
+    },
+    "epnet": {
+      "hidden_sizes": [
+        64
+      ]
+    },
+    "gatenu": {
+      "hidden_sizes": [
+        64
+      ]
+    },
+    "token_mixer": {
+      "hidden_sizes": []
+    },
+    "per_token_ffn": {
+      "hidden_size": 1664,
+      "shared_weights": false
+    },
+    "hr_tower": {
+      "output_dim": 1
+    }
+  },
+  "node_options": {}
+}

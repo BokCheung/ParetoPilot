@@ -3,14 +3,12 @@
 from .config import get_path
 
 
-AGENT_VERSION = "bottleneck-policy-v2"
+AGENT_VERSION = "bottleneck-policy-v3-post-sfps"
 
 
 def affected_prefix(path):
     if path == "dense_mlp":
         return "dense."
-    if path.startswith("embeddings."):
-        return "embedding." + path.split(".")[1] + "."
     if path.startswith("sequence_encoder."):
         return "sequence."
     if path.startswith("towers."):

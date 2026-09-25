@@ -1,6 +1,5 @@
 {
   "batch_size": 32,
-  "lookups_per_sample": {"item_id": 1},
-  "sequence_length": 20,
-  "embedding_cache_hit_rate": 0
+  "embedding_lengths": {},
+  "sequence_length": 20
 }

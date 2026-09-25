@@ -7,6 +7,8 @@ import sys
 from . import __version__
 from .config import ConfigError, load_json, normalize_inputs, validate_search
 from .graph import build_graph
+from .native_config import load_model, normalize_native
+from .native import NativeBuilder, evaluate_native
 from .report import write_analysis, write_search
 from .roofline import evaluate
 from .search import run_search
@@ -19,7 +21,7 @@ def parser():
     sub = p.add_subparsers(dest="command", required=True)
     for command in ("validate", "analyze", "search"):
         c = sub.add_parser(command)
-        c.add_argument("--model", required=True, help="Model JSON configuration")
+        c.add_argument("--model", required=True, help="Model JSON or static native Jsonnet configuration")
         c.add_argument("--npu", required=True, help="NPU JSON specification")
         c.add_argument("--workload", required=True, help="Workload JSON configuration")
         if command != "analyze":
@@ -34,10 +36,15 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
-        model, npu, workload = normalize_inputs(load_json(args.model), load_json(args.npu), load_json(args.workload))
+        model = load_model(args.model)
+        native = isinstance(model, dict) and model.get("format") == "native_nodes"
+        normalize = normalize_native if native else normalize_inputs
+        model, npu, workload = normalize(model, load_json(args.npu), load_json(args.workload))
+        if native and (args.command == "search" or getattr(args, "space", None)):
+            raise ConfigError("Native node graphs support validate/analyze; structure search currently uses the compositional JSON schema")
         search = validate_search(load_json(args.space), model) if getattr(args, "space", None) else None
         if args.command == "validate":
-            graph = build_graph(model, workload)
+            graph = NativeBuilder(model, workload).build() if native else build_graph(model, workload)
             print(json.dumps({"status": "valid", "operator_count": len(graph.operators),
                               "parameter_count": graph.parameter_count,
                               "note": "Schema and graph checks only; run analyze for hardware feasibility."}, indent=2))
@@ -45,9 +52,10 @@ def main(argv=None):
         inputs = {"command": args.command, "model": model, "npu": npu, "workload": workload, "search": search}
         store = RunStore(args.output, inputs, resume=args.resume)
         if args.command == "analyze":
-            result = store.evaluate(model, npu, workload, evaluate)
+            result = store.evaluate(model, npu, workload, evaluate_native if native else evaluate)
             write_analysis(store.root, result)
-            summary = {"status": result["status"], "metrics": result["metrics"], "violations": result["violations"],
+            summary = {"status": result["status"], "evaluation_scope": result["evaluation_scope"],
+                       "metrics": result["metrics"], "violations": result["violations"],
                        "report": str((store.root / "report.md").resolve())}
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0 if result["status"] == "ok" else 2
@@ -58,7 +66,8 @@ def main(argv=None):
 
         result = run_search(model, npu, workload, search, store=store, progress=progress)
         write_search(store.root, result)
-        print(json.dumps({**result["summary"], "report": str((store.root / "report.md").resolve())}, ensure_ascii=False, indent=2))
+        print(json.dumps({**result["summary"], "evaluation_scope": result["baseline"]["evaluation_scope"],
+                          "report": str((store.root / "report.md").resolve())}, ensure_ascii=False, indent=2))
         return 0 if result["pareto"] else 2
     except (ConfigError, OSError) as exc:
         print(f"paretopilot: {exc}", file=sys.stderr)

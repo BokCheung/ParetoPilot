@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def tiny_model():
-    return {"name": "tiny", "dtype": "fp16", "dense_features": 2, "embeddings": [],
+    return {"name": "tiny", "dtype": "fp16", "dense_features": 2, "embedding_inputs": [],
             "towers": [{"name": "ctr", "hidden_sizes": [], "output_dim": 1}]}
 
 
@@ -27,7 +27,7 @@ def tiny_npu():
 
 
 def tiny_workload():
-    return {"batch_size": 2, "lookups_per_sample": {}}
+    return {"batch_size": 2, "embedding_lengths": {}}
 
 
 class RooflineTests(unittest.TestCase):
@@ -57,45 +57,78 @@ class RooflineTests(unittest.TestCase):
     def embedding_case(self):
         model = tiny_model()
         model["dense_features"] = 0
-        model["embeddings"] = [{"name": "id", "vocab_size": 1000, "dim": 4}]
-        workload = {"batch_size": 2, "lookups_per_sample": {"id": 3}}
+        model["embedding_inputs"] = [{"name": "id", "dim": 4, "pooling": "mean"}]
+        workload = {"batch_size": 2, "embedding_lengths": {"id": 3}}
         return model, tiny_npu(), workload
 
-    def test_table_capacity_is_not_lookup_traffic(self):
+    def test_ready_embedding_inputs_have_no_lookup_or_table_weights(self):
+        model, npu, workload = self.embedding_case()
+        result = evaluate(model, npu, workload)
+        # Ready input [2,3,4] fp16 is 48 bytes; mean output [2,4] is 16.
+        # Pool: 64 bytes, Linear: 16+8+4=28, Sigmoid: 8. No table or IDs.
+        self.assertEqual(result["operators"][0]["kind"], "mean")
+        self.assertEqual(result["operators"][0]["external_bytes"], 64)
+        self.assertEqual(result["metrics"]["external_bytes"], 100)
+        self.assertEqual(result["metrics"]["input_tensor_bytes"], 48)
+        self.assertEqual(result["metrics"]["parameter_count"], 4)
+        self.assertEqual(result["metrics"]["weight_bytes"], 8)
+        self.assertEqual(result["metrics"]["peak_memory_bytes"], 72)
+        self.assertFalse(any(op["kind"] == "embedding" for op in result["operators"]))
+        self.assertFalse(any(key.endswith(".table") for key in result["graph"]["parameter_counts"]))
+        self.assertTrue(result["graph"]["tensors"]["embedding_input.0"]["external"])
+
+    def test_legacy_sfps_table_metadata_does_not_change_results(self):
+        model, npu, workload = self.embedding_case()
+        model["embeddings"] = model.pop("embedding_inputs")
+        model["embeddings"][0]["vocab_size"] = 1000
+        workload["lookups_per_sample"] = workload.pop("embedding_lengths")
+        first = evaluate(model, npu, workload)
+        model["embeddings"][0]["vocab_size"] = 10**12
+        second = evaluate(model, npu, workload)
+        self.assertEqual(first, second)
+        self.assertEqual(first["model"]["schema_version"], 2)
+        self.assertNotIn("vocab_size", first["model"]["embedding_inputs"][0])
+
+    def test_legacy_sfps_cache_and_bandwidth_settings_are_ignored(self):
         model, npu, workload = self.embedding_case()
         first = evaluate(model, npu, workload)
-        model["embeddings"][0]["vocab_size"] *= 10
+        workload["embedding_cache_hit_rate"] = 0.99
+        npu.update(random_access_efficiency=0.01, on_chip_memory_bytes=0, on_chip_bandwidth_gbps=0)
         second = evaluate(model, npu, workload)
-        self.assertEqual(first["operators"][0]["external_bytes"], 144)
-        self.assertEqual(first["metrics"]["latency_ms"], second["metrics"]["latency_ms"])
-        self.assertEqual(second["metrics"]["weight_bytes"] - first["metrics"]["weight_bytes"], 72000)
+        self.assertEqual(first, second)
+        self.assertNotIn("on_chip_bytes", second["metrics"])
 
-    def test_cache_counts_hits_at_on_chip_level(self):
+    def test_pooled_ready_vectors_do_not_get_pooled_twice(self):
         model, npu, workload = self.embedding_case()
-        workload["embedding_cache_hit_rate"] = 0.5
-        npu.update(on_chip_memory_bytes=4096, on_chip_bandwidth_gbps=10)
+        model["embedding_inputs"][0]["pooling"] = "none"
+        workload["embedding_lengths"] = {}
         result = evaluate(model, npu, workload)
-        lookup = result["operators"][0]
-        self.assertEqual(lookup["external_bytes"], 120)
-        self.assertEqual(lookup["on_chip_bytes"], 24)
-        self.assertEqual(result["metrics"]["weight_bytes"], 8008)
+        self.assertEqual(result["metrics"]["input_tensor_bytes"], 16)
+        self.assertEqual(result["metrics"]["external_bytes"], 36)
+        self.assertEqual(result["metrics"]["peak_memory_bytes"], 28)
+        self.assertEqual([o["kind"] for o in result["operators"]], ["matmul", "sigmoid"])
 
-    def test_sparse_bandwidth_efficiency_only_changes_lookup(self):
+    def test_model_side_sum_pooling_is_still_evaluated(self):
         model, npu, workload = self.embedding_case()
-        first = evaluate(model, npu, workload)
-        npu["random_access_efficiency"] = 0.25
-        second = evaluate(model, npu, workload)
-        self.assertAlmostEqual(second["operators"][0]["latency_ms"], 4 * first["operators"][0]["latency_ms"])
-        self.assertEqual(first["operators"][1:], second["operators"][1:])
-
-    def test_agent_embedding_priority_includes_lookup_and_pooling(self):
-        model, npu, workload = self.embedding_case()
-        npu["random_access_efficiency"] = 0.01
+        model["embedding_inputs"][0]["pooling"] = "sum"
         result = evaluate(model, npu, workload)
-        diagnosis = ExperimentAgent().diagnose(result, ["embeddings.0.dim"])
-        share = diagnosis["search_priorities"][0]["latency_share"]
-        self.assertGreater(share, 0.99)
-        self.assertEqual(diagnosis["top_operators"][0]["name"], "embedding.0")
+        self.assertEqual(result["operators"][0]["kind"], "sum")
+        self.assertEqual(result["operators"][0]["useful_ops"], 2 * (3 - 1) * 4)
+        self.assertEqual(result["operators"][0]["external_bytes"], 64)
+
+    def test_input_tensor_capacity_is_not_removed_with_sfps(self):
+        model, npu, workload = self.embedding_case()
+        npu["memory_capacity_bytes"] = 71
+        result = evaluate(model, npu, workload)
+        self.assertEqual(result["status"], "infeasible")
+        self.assertIn("72", result["violations"][0])
+
+    def test_e2e_metric_and_scope_cover_every_remaining_operator(self):
+        result = evaluate(*self.embedding_case())
+        self.assertEqual(result["evaluation_scope"]["name"], "post_sfps_model_e2e")
+        self.assertEqual(result["metrics"]["model_e2e_latency_ms"], sum(o["latency_ms"] for o in result["operators"]))
+        self.assertEqual(result["metrics"]["model_e2e_latency_ms"], result["metrics"]["latency_ms"])
+        self.assertNotIn("embedding", [o["kind"] for o in result["operators"]])
 
     def test_capacity_and_operator_support_reject(self):
         npu = tiny_npu()
@@ -117,7 +150,7 @@ class RooflineTests(unittest.TestCase):
     def test_sequence_attention_grows_quadratically(self):
         model = load_json(ROOT / "examples/sequence_model.json")
         npu = tiny_npu()
-        workload = {"batch_size": 2, "lookups_per_sample": {"item_id": 1}, "sequence_length": 4}
+        workload = {"batch_size": 2, "embedding_lengths": {}, "sequence_length": 4}
         first = evaluate(model, npu, workload)
         workload["sequence_length"] = 8
         second = evaluate(model, npu, workload)
@@ -125,6 +158,18 @@ class RooflineTests(unittest.TestCase):
         b = next(o for o in second["operators"] if o["name"] == "sequence.0.attention_scores")
         self.assertEqual(b["useful_ops"], 4 * a["useful_ops"])
         self.assertEqual(b["output_shape"], [2, 4, 8, 8])
+
+    def test_sequence_starts_with_ready_tensor_without_table(self):
+        model = load_json(ROOT / "examples/sequence_model.json")
+        workload = load_json(ROOT / "examples/sequence_workload.json")
+        first = evaluate(model, tiny_npu(), workload)
+        self.assertTrue(first["graph"]["tensors"]["sequence.input"]["external"])
+        self.assertEqual(first["graph"]["tensors"]["sequence.input"]["shape"], [32, 20, 32])
+        model["schema_version"] = 1
+        model["sequence_encoder"]["vocab_size"] = 10**12
+        second = evaluate(model, tiny_npu(), workload)
+        self.assertEqual(first, second)
+        self.assertFalse(any(key.endswith(".table") for key in second["graph"]["parameter_counts"]))
 
 
 class ValidationTests(unittest.TestCase):
@@ -146,7 +191,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_feature_workload_must_match(self):
         with self.assertRaises(ConfigError):
-            normalize_inputs(tiny_model(), tiny_npu(), {"batch_size": 1, "lookups_per_sample": {"unknown": 2}})
+            normalize_inputs(tiny_model(), tiny_npu(), {"batch_size": 1, "embedding_lengths": {"unknown": 2}})
 
     def test_sequence_head_dependency(self):
         model = load_json(ROOT / "examples/sequence_model.json")
@@ -156,9 +201,22 @@ class ValidationTests(unittest.TestCase):
 
     def test_search_cannot_change_feature_or_task_semantics(self):
         model = validate_model(tiny_model())
-        for path in ("dtype", "dense_features", "towers.0.output_dim", "towers.0.name"):
+        for path in ("dtype", "dense_features", "towers.0.output_dim", "towers.0.name",
+                     "embeddings.0.dim", "embedding_inputs.0.dim", "sequence_encoder.embedding_dim"):
             with self.subTest(path=path), self.assertRaises(ConfigError):
                 validate_search({"parameters": {path: [1]}}, model)
+
+    def test_ready_input_shapes_are_unambiguous(self):
+        model = tiny_model()
+        model["embedding_inputs"] = [{"name": "id", "dim": 4, "pooling": "none"}]
+        with self.assertRaises(ConfigError):
+            normalize_inputs(model, tiny_npu(), {"batch_size": 1, "embedding_lengths": {"id": 3}})
+        model["embedding_inputs"][0]["pooling"] = "sum"
+        with self.assertRaises(ConfigError):
+            normalize_inputs(model, tiny_npu(), {"batch_size": 1})
+        with self.assertRaises(ConfigError):
+            normalize_inputs(model, tiny_npu(), {"batch_size": 1, "embedding_lengths": {"id": 1},
+                                                "lookups_per_sample": {"id": 1}})
 
     def test_json_duplicates_and_non_finite_values(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -286,12 +344,17 @@ class CliTests(unittest.TestCase):
             summary = json.loads(first.stdout)
             self.assertEqual(summary["trials"], 40)
             self.assertTrue((output / "report.md").exists())
+            report = (output / "report.md").read_text(encoding="utf-8")
+            self.assertIn("SFPS", report)
+            self.assertNotIn("累计缓存读取量", report)
+            self.assertEqual(summary["evaluation_scope"]["name"], "post_sfps_model_e2e")
             exports = load_json(output / "pareto.json")
             self.assertTrue(exports)
             for item in exports:
                 result = evaluate(load_json(output / item["config_path"]), load_json(ROOT / "examples/npu.json"),
                                   load_json(ROOT / "examples/workload.json"))
                 self.assertEqual(result["metrics"], item["metrics"])
+                self.assertEqual(item["evaluation_scope"]["name"], "post_sfps_model_e2e")
             repeat = self.run_cli(*args)
             self.assertEqual(repeat.returncode, 2)
             resumed = self.run_cli(*args, "--resume")
