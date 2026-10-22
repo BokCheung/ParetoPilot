@@ -5,5 +5,3 @@ __pycache__/
 build/
 dist/
 runs/
-.plot-deps/
-.matplotlib/

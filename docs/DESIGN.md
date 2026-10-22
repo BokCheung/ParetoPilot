@@ -1,33 +1,41 @@
-# Kernel 调优第一版需求与设计
+# Kernel 调优设计（离线 Dummy Agent 版本）
 
 ## 固定语义
 
-输入 PyTorch `matmul.py` 或 Elementwise 脚本，提供固定 shape/dtype 的显式描述。第一版不搜索输入形状、模型架构或计算语义。MatMul 描述为二维 m/n/k；Elementwise 为 numel、input_count、flops_per_element。转置、布局、融合、batch 等需另外扩展模板与适配器。
+本版本针对 Ascend 910B / CANN 8.5.0：二维 FP16 MatMul，或同 shape 的两输入 FP16 Add。固定输入 shape/dtype，搜索不改变计算语义或模型架构。MatMul 的 M/N/K 要求 16 对齐；Add 支持尾块。其他 Elementwise 操作、转置、batch、融合和不同 dtype 需增加模板。
 
-Baseline：原始 PyTorch → ONNX → ATC → baseline OM。候选：版本匹配的官方开源/自定义算子源码 → Host tiling 与 Device 参数注入 → 编译注册 → 自定义算子图 → ATC → candidate OM。PyTorch 只做正确性参考。
+Baseline：内置或用户 PyTorch build_case → ONNX → ATC → baseline OM。候选：内置 Ascend C Host/Device 源码 → 参数注入 → msopgen 工程编译 → 独立 OPP → 自定义 ONNX → ATC → candidate OM。无需用户已有工程或 Agent 服务。
 
-性能比较仅使用两侧 OM 目标任务的 profiling 耗时中位数。`Task Duration(us)` 包含调度和完成响应，不是纯 Device 计算时间。转换、编译和加载不纳入适应度。
+性能比较仅使用 OM 目标任务 Task Duration(us) 中位数，不包含导出、编译、加载或 CPU PyTorch 耗时。PyTorch 只生成固定输入的正确性参考。
 
-## 搜索分工
+## Roofline 和 Dummy Agent
 
-规则 Agent 分析 Roofline，决定优先参数；结合实测优胜者在原模板能力域内细化范围，停滞两代后扩展。遗传算法使用锦标赛选择、均匀交叉、偏置变异、精英保留和全域移民，避免精细化丢失探索。失败候选计入预算，重复配置不重测。预算仅计搜索评测，不含基线与最终复测。
+Roofline 保留 FLOPs、数学最低流量、可选实测流量、算术强度、理想时间下界、瓶颈假设及建议参数优先级。shape 最低流量不冒充实测 HBM 流量，理想下界不冒充耗时预测。硬件峰值需按具体型号、dtype、执行单元和稠密/稀疏口径填写，示例值仅作假设。
 
-MatMul 域：tile_m/tile_n/tile_k/buffers/block_dim。Elementwise 域：tile_elems/buffers/block_dim。所有参数必须来自实际模板能力。当前合法性检查包含对齐、buffer 数、block 上限与保守本地存储估计。实际 L0/L1/UB 各级容量、布局、尾块和参数依赖必须由真机适配器进一步校验。
+每代 Roofline 与完整历史传给 Agent.propose(context)。默认 DummyAgent 返回原始参数域及空优先级，不作域调整，不调用模型或网络。真实策略留给后续插件实现，见 AGENT.md。
 
-Roofline 区分数学最低流量与 profiling 测得流量。只由 shape 得到的瓶颈是理论假设；不能将理想下界视为预测或实测耗时。配置中的 peak_flops 必须对应具体 dtype、执行单元和稠密/稀疏口径。
+## 搜索
 
-## 评测与验收
+锦标赛选择、均匀交叉、逐参数变异、精英保留和随机未测配置注入。配置 seed 固定随机序列。测过的参数不重复评测，失败候选计入预算；预算不包含首次基线与最终复测。精英参与繁殖而不重复计费。
 
-每个候选依次完成 build、export、atc、verify、profile，未通过者不得参与排名。ATC 响应须与源码/参数哈希一致，并提供实现 ID 和证据文件；verify 与 profile 响应须指向同一 OM 哈希。适配器必须证明实际选中候选，哈希和证据文件存在本身不能证明 ATC 的语义行为。
+合法性预筛包括对齐、buffer 数、block 上限和保守存储估计；实际资源依赖由 Host 和 CANN Tiling API 进一步验证。域受限时可在未耗尽预算前结束。搜索停在 generations、budget 或无未测合法配置任一条件。
 
-候选正确性以 PyTorch 输出为准，遵守配置 atol/rtol，覆盖实际输入和尾块。目标名称精确匹配，CSV 预先排除预热及非目标样本；不能按模糊名称混合多个节点、设备或 stream。
+MatMul 搜索 tile_m/n/k、block_dim；buffers 固定 1，仅表示没有暴露手动缓冲开关，CANN 内部缓冲由其 API 决定。Add 搜索 tile_elems、buffers、block_dim。
 
-优胜者与 baseline 交错重新构建和复测。只有收益超过最小阈值和观测相对波动范围才采用候选；复测失败时保留 baseline。这是保守工程启发式，不是置信区间。
+## 测量与选择
 
-## 来源与复现
+PyACL 进程加载并执行同一 OM：先正确性检查，再预热，随后开启 profiling、执行 repeats 次、停止采样，再复核输出。资源通过 ExitStack 清理。当前使用一组固定 seed 的输入；这不是对所有输入的形式化正确性证明。
 
-记录芯片、CANN 版本、源码标签、源码哈希、适配器文件哈希、所有阶段请求/响应和产物。候选安装到独立 OPP 路径，不覆盖 stock baseline 环境。
+CSV 按精确字段匹配，要求恰好 repeats 条目标任务，并拒绝跨名称、设备、stream/model 混样；融合、多任务拆分和重复导出均不能悄悄混入排名。NaN、非正耗时、错误精度、编译或运行失败均记为失败。
 
-开源源码未必对应 stock OM 的实现；无法确认一致时，额外测量未修改源码实现，区分实现替换收益与调参收益。当前不自动完成该第三路对照。
+候选独立算子名 PpMatmul / PpAdd；其 Host tiling 输出参数哈希签名，控制器要求在 ATC 日志中找到该签名，再记录源码、安装产物、OM 和日志哈希。它证明所编译 Host 被调用，最终还需实际正确性和目标任务记录共同验收，不单靠“证据文件存在”。
 
-当前在无真机环境下仅验证模拟流程，尚未提供特定芯片/CANN 的可部署 Ascend C 模板或真机采集实现。明确提供接入边界，不伪造上板性能。
+优胜者与 baseline 每轮重新构建/转换，执行顺序轮流交换。只有中位数相对收益大于 min_gain 和两组轮次中位数的最大相对极差才采用候选。该规则是工程启发式，不是统计置信区间。复测失败或收益不足保留基线，selected_params=null。
+
+## 可复现性与边界
+
+保存配置、环境、模板哈希、生成源码哈希、OPP 哈希、OM 哈希、命令、日志、输入输出和 Agent 决策。不会覆盖已有试验目录，不支持自动续跑。
+
+stock 实现和自定义实现不同，因此收益包含实现替换和参数选择。当前没有自动加入“未调优自定义源码”第三路对照，不能将所有收益归因于调参。
+
+已提供原生编译与运行链路；本地没有昇腾硬件，真机编译、精度和性能仍须按 DEPLOYMENT.md 的 smoke 步骤验收。

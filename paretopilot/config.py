@@ -1,67 +1,94 @@
-"""Explicit fixed-workload descriptions; never execute arbitrary baseline scripts."""
-from pathlib import Path
 import math
-import sys
-from .artifacts import ConfigError, load_json, number
+from pathlib import Path
+from .util import TuningError, number, read_json
 
 
 def load_config(path):
-    path = Path(path).resolve()
-    c = load_json(path)
+    source = Path(path).resolve()
+    c = read_json(source)
     try:
         if not isinstance(c, dict):
-            raise ConfigError("Kernel configuration must be an object")
-        for section in ("operator", "hardware", "space", "baseline_params", "search", "correctness", "profiling"):
-            if not isinstance(c[section], dict):
-                raise ConfigError(f"{section} must be an object")
-        if c["mode"] not in ("real", "simulation"):
-            raise ConfigError("mode must be real or simulation")
-        for name in ("baseline_source", "kernel_source"):
-            c[name] = str((path.parent / c[name]).resolve())
-            if not Path(c[name]).is_file():
-                raise ConfigError(f"Missing {name}: {c[name]}")
-        for key in ("chip", "cann_version", "source_tag"):
-            if not isinstance(c[key], str) or not c[key].strip():
-                raise ConfigError(f"{key} is required")
+            raise TuningError("Config must be an object")
+        for key in ("operator", "hardware", "space", "search", "measurement", "agent"):
+            if not isinstance(c[key], dict):
+                raise TuningError(f"{key} must be an object")
+        if c["backend"] not in ("simulation", "ascend"):
+            raise TuningError("backend must be simulation or ascend")
         op = c["operator"]
-        if op["kind"] not in ("matmul", "elementwise") or op["dtype"] not in ("float16", "bfloat16", "float32"):
-            raise ConfigError("Unsupported operator kind or dtype")
-        dims = ("m", "n", "k") if op["kind"] == "matmul" else ("numel", "input_count", "flops_per_element")
-        for key in dims:
-            number(op[key], key, integer=True, strict=True)
-        for key in ("peak_flops", "bandwidth_bytes_s", "local_memory_bytes", "max_blocks"):
-            number(c["hardware"][key], key, strict=True)
-        number(c["alignment"], "alignment", integer=True, strict=True)
-        expected = {"tile_m", "tile_n", "tile_k", "buffers", "block_dim"} if op["kind"] == "matmul" else {"tile_elems", "buffers", "block_dim"}
-        if set(c["space"]) != expected or set(c["baseline_params"]) != expected:
-            raise ConfigError(f"Parameters must be {sorted(expected)}")
-        for name, values in c["space"].items():
-            if not isinstance(values, list) or not values:
-                raise ConfigError(f"space.{name} must be a nonempty list")
-            for value in values + [c["baseline_params"][name]]:
-                number(value, name, integer=True, strict=True)
+        if op["kind"] not in ("matmul", "add") or op["dtype"] not in ("float16", "float32"):
+            raise TuningError("V1 supports matmul/add with float16/float32")
+        for key in (("m", "n", "k") if op["kind"] == "matmul" else ("numel",)):
+            number(op[key], key, 1, True)
+        for key in ("peak_flops", "bandwidth_bytes_s", "local_memory_bytes", "max_blocks", "alignment"):
+            number(c["hardware"][key], key, 1, key not in ("peak_flops", "bandwidth_bytes_s"))
+        for key, values in c["space"].items():
+            if not key.isidentifier() or not isinstance(values, list) or not values:
+                raise TuningError(f"Invalid parameter domain: {key}")
+            for value in values:
+                number(value, key, 1, True)
             if len(set(values)) != len(values):
-                raise ConfigError(f"Duplicate space.{name} values")
-        if math.prod(len(v) for v in c["space"].values()) > 200000:
-            raise ConfigError("V1 supports at most 200000 Cartesian combinations")
-        search = c["search"]
-        for name in ("population", "generations", "max_evaluations", "confirm_rounds", "repeats"):
-            number(search[name], name, minimum=2 if name in ("population", "repeats", "confirm_rounds") else 1, integer=True)
-        number(search["warmup"], "warmup", integer=True)
-        number(search["seed"], "seed", integer=True)
-        for key in ("mutation_rate", "min_relative_gain"):
-            number(search[key], key)
-            if search[key] > 1:
-                raise ConfigError(f"{key} must be <= 1")
-        for key in ("atol", "rtol"):
-            number(c["correctness"][key], key)
-        number(c["timeout_s"], "timeout_s", strict=True)
-        if not isinstance(c["adapter"], list) or not c["adapter"] or not all(isinstance(x, str) and x for x in c["adapter"]):
-            raise ConfigError("adapter must be a nonempty argv array")
-        c["adapter"] = [sys.executable if x == "{python}" else str((path.parent / x).resolve()) if (path.parent / x).is_file() else x for x in c["adapter"]]
-        for key in ("target_name", "name_column", "duration_column"):
-            if not isinstance(c["profiling"][key], str) or not c["profiling"][key]:
-                raise ConfigError(f"profiling.{key} is required")
-    except (KeyError, TypeError) as exc:
-        raise ConfigError(f"Invalid kernel config: {exc}") from exc
+                raise TuningError(f"Duplicate values: {key}")
+        required = {"tile_m", "tile_n", "tile_k", "buffers", "block_dim"} if op["kind"] == "matmul" else {"tile_elems", "buffers", "block_dim"}
+        if set(c["space"]) != required:
+            raise TuningError(f"Template requires parameters {sorted(required)}")
+        if math.prod(map(len, c["space"].values())) > 200000:
+            raise TuningError("Limit discrete template space to 200000 combinations")
+        s = c["search"]
+        for key in ("population", "generations", "budget", "seed"):
+            number(s[key], key, 2 if key == "population" else 0 if key == "seed" else 1, True)
+        for key in ("mutation_rate", "min_gain"):
+            number(s[key], key)
+            if s[key] > 1:
+                raise TuningError(f"{key} must be <= 1")
+        m = c["measurement"]
+        for key in ("warmup", "repeats", "confirmation_rounds"):
+            number(m[key], key, 0 if key == "warmup" else 2, True)
+        for key in ("rtol", "atol"):
+            number(m[key], key)
+        number(m["timeout_s"], "timeout_s", 1)
+        for role in ("baseline", "candidate"):
+            selector = m["selectors"][role]
+            if not isinstance(selector, dict) or not selector or not all(isinstance(k, str) and isinstance(v, str) and v for k, v in selector.items()):
+                raise TuningError("Profiling selectors must contain exact nonempty column/value pairs")
+        c.setdefault("baseline", {"kind": "builtin"})
+        if c["baseline"]["kind"] == "python":
+            c["baseline"]["path"] = str((source.parent / c["baseline"]["path"]).resolve())
+            if not Path(c["baseline"]["path"]).is_file():
+                raise TuningError("Missing baseline Python module")
+        elif c["baseline"]["kind"] != "builtin":
+            raise TuningError("baseline.kind must be builtin or python")
+        if c["agent"]["kind"] not in ("dummy", "python"):
+            raise TuningError("agent.kind must be dummy or python")
+        if c["agent"]["kind"] == "python":
+            c["agent"]["path"] = str((source.parent / c["agent"]["path"]).resolve())
+            if not Path(c["agent"]["path"]).is_file():
+                raise TuningError("Missing Agent Python module")
+        if c["backend"] == "ascend":
+            a = c["ascend"]
+            for key in ("soc_version", "cann_version", "source_tag"):
+                if not isinstance(a[key], str) or not a[key] or "REPLACE" in a[key]:
+                    raise TuningError(f"Set ascend.{key} for the target machine")
+            number(a["device"], "device", 0, True)
+            extra = a.get("atc_extra", [])
+            if not isinstance(extra, list) or not all(isinstance(v, str) and v.startswith("--") for v in extra):
+                raise TuningError("ascend.atc_extra must be a list of --flag=value strings")
+            owned = {"--framework", "--model", "--output", "--soc_version", "--input_shape", "--input_format", "--log"}
+            if any(v.split("=", 1)[0] in owned for v in extra):
+                raise TuningError("atc_extra cannot override controller-owned ATC flags")
+            if c["hardware"]["alignment"] % 16:
+                raise TuningError("Ascend templates require alignment to be a multiple of 16 elements")
+            if any(value > 2147483647 for values in c["space"].values() for value in values):
+                raise TuningError("Ascend template parameters must fit signed int32")
+            if op["kind"] == "add" and op["numel"] > 4294967295:
+                raise TuningError("Add numel must fit uint32")
+            if op["kind"] == "matmul" and any(op[k] > 2147483647 for k in ("m", "n", "k")):
+                raise TuningError("MatMul dimensions must fit int32")
+            if op["dtype"] != "float16":
+                raise TuningError("Bundled 910B kernels currently support float16")
+            if op["kind"] == "matmul" and (any(op[k] % 16 for k in ("m", "n", "k")) or c["space"]["buffers"] != [1]):
+                raise TuningError("Bundled MatMul requires M/N/K multiples of 16 and buffers=[1] (CANN owns internal buffers)")
+            if not a["soc_version"].startswith("Ascend910B") or not a["cann_version"].startswith("8.5.0"):
+                raise TuningError("Bundled kernels target Ascend910B and CANN 8.5.0")
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise TuningError(f"Invalid configuration: {exc}") from exc
     return c

@@ -1,47 +1,94 @@
-"""Kernel-only command-line interface."""
 import argparse
+import csv
 import json
+from pathlib import Path
 import sys
+import subprocess
 from . import __version__
-from .artifacts import ConfigError
 from .config import load_config
+from .doctor import inspect_environment
+from .package import create_package
 from .profiling import read_profile
 from .roofline import analyze
-from .search import tune_kernel
-from .space import candidates, legal
+from .search import run
+from .space import enumerate_space
+from .util import TuningError, write_json
+
+
+def parser():
+    p = argparse.ArgumentParser(description="Offline Ascend kernel tuning; no Agent service required")
+    p.add_argument("--version", action="version", version=__version__)
+    sub = p.add_subparsers(dest="command", required=True)
+    for name in ("validate", "doctor", "roofline", "baseline", "run"):
+        cmd = sub.add_parser(name)
+        cmd.add_argument("--config", required=True)
+        if name in ("baseline", "run"):
+            cmd.add_argument("--output", required=True, help="New empty experiment directory")
+            cmd.add_argument("--smoke", action="store_true", help="Limit to one candidate and two confirmation rounds")
+        if name == "doctor":
+            cmd.add_argument("--output", help="Optional JSON environment record")
+    cmd = sub.add_parser("inspect-profile", help="List exact task identifiers and counts in a CSV")
+    cmd.add_argument("csv", nargs="+")
+    cmd = sub.add_parser("import-profile", help="Validate and analyze an existing target-op CSV")
+    cmd.add_argument("--config", required=True)
+    cmd.add_argument("--role", choices=("baseline", "candidate"), required=True)
+    cmd.add_argument("csv", nargs="+")
+    cmd = sub.add_parser("package", help="Create a source ZIP to transfer to the test machine")
+    cmd.add_argument("--output", required=True)
+    return p
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="paretopilot", description="Roofline-guided Ascend kernel genetic optimization using OM profiling")
-    parser.add_argument("--version", action="version", version=__version__)
-    sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("validate", "space", "analyze", "tune-kernel"):
-        p = sub.add_parser(name)
-        p.add_argument("--config", required=True)
-        if name == "analyze":
-            p.add_argument("--csv", help="Optional baseline op_summary CSV")
-        if name == "tune-kernel":
-            p.add_argument("--output", required=True)
-    args = parser.parse_args(argv)
+    args = parser().parse_args(argv)
     try:
-        c = load_config(args.config)
-        pool = candidates(c)
-        if not pool or not legal(c["baseline_params"], c):
-            raise ConfigError("No legal candidates or invalid baseline template parameters")
-        if args.command == "validate":
-            result = {"status": "valid", "mode": c["mode"], "operator": c["operator"], "legal_candidates": len(pool)}
-        elif args.command == "space":
-            result = {"legal_candidates": len(pool), "parameters": c["space"], "candidates": pool}
-        elif args.command == "analyze":
-            metrics = read_profile(args.csv, c) if args.csv else {}
-            result = {**metrics, "roofline": analyze(c, metrics.get("duration_us"))}
+        if args.command == "package":
+            result = create_package(args.output)
+        elif args.command == "inspect-profile":
+            result = []
+            for file in args.csv:
+                counts = {}
+                with Path(file).open(encoding="utf-8-sig", newline="") as stream:
+                    reader = csv.DictReader(stream)
+                    columns = [k for k in ("Op Name", "Op Type", "Device_id", "Device Id", "Stream Id", "Model Id") if k in (reader.fieldnames or [])]
+                    if not columns:
+                        raise TuningError(f"No task identifier columns in {file}")
+                    for row in reader:
+                        key = tuple(row[k] for k in columns)
+                        counts[key] = counts.get(key, 0)+1
+                result.append({"file": file, "tasks": [{**dict(zip(columns,k)), "samples": v} for k,v in counts.items()]})
         else:
-            result = tune_kernel(args.config, args.output)
+            c = load_config(args.config)
+            if args.command == "validate":
+                count = len(enumerate_space(c))
+                if not count:
+                    raise TuningError("No legal template configurations")
+                result = {"valid": True, "backend": c["backend"], "legal_candidates": count, "agent": c["agent"]["kind"]}
+            elif args.command == "doctor":
+                result = inspect_environment(c)
+                if args.output:
+                    write_json(args.output, result)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                return 0 if result["ready"] else 2
+            elif args.command == "roofline":
+                result = analyze(c)
+            elif args.command == "import-profile":
+                m = c["measurement"]
+                result = read_profile(args.csv, m["selectors"][args.role], m["repeats"], m.get("duration_column", "Task Duration(us)"), m.get("traffic_column"))
+                result["roofline"] = analyze(c, result["duration_us"], result["measured_bytes"])
+            else:
+                if args.smoke:
+                    c["search"].update(population=2, generations=1, budget=1)
+                    c["measurement"]["confirmation_rounds"] = 2
+                if c["backend"] == "ascend" and not sys.platform.startswith("linux"):
+                    raise TuningError("Ascend backend requires the Linux 910B/CANN test machine; use simulation here")
+                def progress(t, count):
+                    print(f"[{count}/{c['search']['budget']}] {t['status']}: "+(f"{t['duration_us']:.4f} us" if t['status']=='ok' else t['error']), file=sys.stderr, flush=True)
+                result = run(c, args.output, progress, baseline_only=args.command == "baseline")
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-    except (ConfigError, OSError) as exc:
-        print(f"paretopilot: {exc}", file=sys.stderr)
+        return 2 if isinstance(result, dict) and result.get("successful_candidates") == 0 else 0
+    except (TuningError, OSError, ImportError, subprocess.SubprocessError) as exc:
+        print(f"ParetoPilot: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
-        print("Interrupted; partial stage records remain in the output directory.", file=sys.stderr)
+        print("Interrupted; completed trial artifacts were retained.", file=sys.stderr)
         return 130

@@ -1,63 +1,62 @@
 # ParetoPilot
 
-固定 shape/dtype 的昇腾算子 Kernel 调优 Agent。输入 PyTorch baseline 与可调算子源码，基于 Roofline 分析搜索方向，通过遗传算法优化参数，统一比较 **baseline OM 与 candidate OM 的目标算子 profiling 任务耗时**。
+固定 shape/dtype 的昇腾算子参数搜索工具。目标测试环境为 **Linux、Ascend 910B、CANN 8.5.0**，无需 Agent 接口、API Key 或联网推理。
 
-本项目已按 Kernel 调优需求重建，不再包含模型结构搜索、推荐模型配置、硬件对比或参数扫描功能。
+当前实现：PyTorch 参考输出与 ONNX 导出 → ATC 基线 OM → Roofline → Dummy Agent 参数域 → 遗传搜索 → 内置 Ascend C 候选编译、独立注册、ATC → PyACL 正确性与 profiling → 交错复测 → 报告。
 
-## 评测流程
+## 支持范围
 
-```text
-PyTorch baseline → ONNX → ATC → baseline OM → 校验与 profiling
-                                          ↓
-                       Roofline → Agent 制定/调整参数域
-                                          ↓
-                       遗传算法 → 合法候选 → 编译自定义算子
-                                          ↓
-                       自定义算子图 → ATC → candidate OM
-                                          ↓
-                       校验、生效证据、profiling → 适应度
-                                          ↓
-                       基线/优胜者交错复测 → 参数与报告
-```
+| 项目 | 当前支持 |
+| --- | --- |
+| MatMul | 二维 FP16，M/N/K 为 16 的倍数，ND 输入输出，无转置、bias、batch |
+| Elementwise | 两输入同 shape 的 FP16 Add，支持任意正整数 numel 与尾块 |
+| 参数 | MatMul: tile_m/n/k、block_dim；buffers 固定 1，由 CANN 管理内部缓冲 |
+| 参数 | Add: tile_elems、buffers=1/2、block_dim |
+| Agent | 默认 DummyAgent，原样返回配置参数域；每代保存 Roofline/历史输入与建议输出 |
+| 指标 | 两侧 OM 目标任务 Task Duration(us) 中位数 |
+| 报告 | HTML、Markdown、Roofline SVG、CSV、JSON、阶段日志、参数/源码/OM 哈希 |
 
-PyTorch 输出只作正确性参照；直接执行 PyTorch 的时间不参与性能排名。适应度为目标算子 `Task Duration(us)` 的中位数。Baseline 与候选保持输入、硬件、精度、预热和采集条件一致。
+这里提供实际 Host/Device 源码和执行链路，不需要自行准备算子工程。msopgen 只生成与本机 CANN 配套的构建框架，ParetoPilot 注入内置实现。**本机没有 NPU/CANN，尚未完成真机编译与性能验收。**
 
-## 快速运行
+## 本机运行模拟闭环
 
-Python 3.10+，控制器只使用标准库。无需安装 PyTorch/CANN 即可验证模拟流程：
+Python 3.10+，控制器只依赖标准库。在项目根目录运行：
 
 ```bash
-git clone https://github.com/BokCheung/ParetoPilot.git
-cd ParetoPilot
-python -m pip install -e .
-python -m paretopilot validate --config examples/matmul.demo.json
-python -m paretopilot analyze --config examples/matmul.demo.json
-python -m paretopilot space --config examples/matmul.demo.json
-python -m paretopilot tune-kernel --config examples/matmul.demo.json --output runs/matmul-demo
-python -m paretopilot tune-kernel --config examples/elementwise.demo.json --output runs/elementwise-demo
-python -m unittest discover -s tests
+python -m paretopilot validate --config examples/simulation_matmul.json
+python -m paretopilot run --config examples/simulation_matmul.json --output runs/sim-matmul
+python -m paretopilot run --config examples/simulation_add.json --output runs/sim-add
 ```
 
-输出目录必须为空。示例的 OM、耗时、正确性及 ATC 记录全部为 **模拟数据**，不能作为实际性能结论。真实链路需要 Linux 昇腾环境、匹配的 CANN 源码和工程适配器，详见 [需求与设计](docs/DESIGN.md)、[适配器协议](docs/ADAPTER.md)。
+打开输出目录的 `report.html`。模拟模式的耗时与正确性结果均为合成数据，不能用于声明硬件收益。输出目录必须为空；已有试验不会被覆盖。
 
-## 代码结构
+## 搬到昇腾机器
 
-| 模块 | 职责 |
-| --- | --- |
-| `config.py` | 固定算子、硬件、离散参数域和运行配置校验 |
-| `space.py` | 模板合法性、Roofline 参数优先级引导的域调整 |
-| `roofline.py` | FLOPs、最低/实测流量、算术强度及瓶颈假设 |
-| `search.py` | 锦标赛选择、交叉、变异、精英保留、移民、交错复测 |
-| `backend.py` | build/export/atc/verify/profile 阶段执行与证据检查 |
-| `profiling.py` | 精确匹配目标算子，导入 OM profiling 微秒样本 |
-| `artifacts.py` / `report.py` | 原子记录、源码哈希、实验报告 |
-| `adapters/ascend_driver.py` | 真机工程接入模板，未配置时明确失败 |
-| `scripts/demo_adapter.py` | 仅模拟协议演示，拒绝 real 模式 |
+```bash
+python -m paretopilot package --output dist/ParetoPilot-ascend-910b-cann850.zip
+```
 
-## 输出
+ZIP 包含源码、算子模板、示例、文档和测试，不含本机虚拟环境、模拟结果、CANN 或 Python 第三方 wheel。拷贝解压后按 [部署步骤](docs/DEPLOYMENT.md) 执行。无需复制本机的 Windows 虚拟环境。
 
-`manifest.json` 保存配置和来源哈希；`history.json` 保存去重试验；`baseline/`、`trials/`、`confirmation/` 保存各阶段请求、响应、日志与产物；`summary.json` 保存搜索域变化、Roofline、复测和决策；`best_params.json` 保存最终选择；源码快照用于复现；`report.md` 是人读报告。
+```bash
+python -m paretopilot doctor --config examples/ascend910b_add.json --output environment.json
+python -m paretopilot run --config examples/ascend910b_add.json --output runs/add-smoke --smoke
+python -m paretopilot run --config examples/ascend910b_matmul.json --output runs/matmul-smoke --smoke
+```
 
-## 当前边界
+示例 SoC 为 `Ascend910B1`；必须按测试机实际型号调整。Roofline 的算力、带宽只是示例假设，需要替换成该芯片、dtype、稠密口径下的数值。配置通过不代表硬件参数已验证。
 
-支持二维 MatMul 和单一 Elementwise 模板契约，不执行任意 Python 源码做自动语义推断。规则 Agent 已实现；尚未绑定 LLM。真实 Ascend C 源码、ONNX 导出、注册、ATC、OM 执行与 profiling 由匹配具体芯片/CANN 的适配器实现。契约 JSON 不是可部署 Kernel。没有断点续跑；失败日志保留在原输出目录。
+## 自定义基线与未来 Agent
+
+- 基线：`examples/baseline_matmul.py` 提供 `build_case(operator, seed)`。输入/输出须保持上述固定语义，候选模板不会自动翻译任意 Python 算子。
+- Agent：见 [扩展接口](docs/AGENT.md)。只需替换本地插件 `propose(context)`，保留现有构建和搜索流程。
+- 构建与测量：见 [真实后端说明](docs/ADAPTER.md)。
+- 搜索与判定：见 [设计](docs/DESIGN.md)。
+
+## 验证
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+标准库覆盖控制器和模拟闭环；安装 numpy 后运行 PyACL mock 与数值检查；安装 torch/onnx 后额外运行真实 PyTorch→ONNX 导出测试。缺依赖的相关测试会明确 skip。PyACL mock 只验证调用顺序和清理，不证明 NPU kernel 正确或可编译。

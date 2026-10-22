@@ -1,0 +1,71 @@
+{
+  "backend": "ascend",
+  "operator": {
+    "kind": "add",
+    "dtype": "float16",
+    "numel": 1048593
+  },
+  "baseline": {
+    "kind": "builtin"
+  },
+  "hardware": {
+    "peak_flops": 200000000000000,
+    "bandwidth_bytes_s": 1000000000000,
+    "local_memory_bytes": 196608,
+    "max_blocks": 40,
+    "alignment": 16,
+    "note": "Illustrative Roofline assumptions, NOT verified 910B specifications. Set measured or documented values for your exact chip and dtype."
+  },
+  "space": {
+    "tile_elems": [
+      256,
+      1024,
+      4096,
+      8192
+    ],
+    "buffers": [
+      1,
+      2
+    ],
+    "block_dim": [
+      4,
+      8,
+      16,
+      32,
+      40
+    ]
+  },
+  "search": {
+    "population": 6,
+    "generations": 4,
+    "budget": 12,
+    "seed": 42,
+    "mutation_rate": 0.25,
+    "min_gain": 0.03
+  },
+  "measurement": {
+    "warmup": 5,
+    "repeats": 20,
+    "confirmation_rounds": 3,
+    "rtol": 0.01,
+    "atol": 0.01,
+    "timeout_s": 900,
+    "selectors": {
+      "baseline": {
+        "Op Type": "Add"
+      },
+      "candidate": {
+        "Op Type": "PpAdd"
+      }
+    }
+  },
+  "agent": {
+    "kind": "dummy"
+  },
+  "ascend": {
+    "soc_version": "Ascend910B1",
+    "cann_version": "8.5.0",
+    "source_tag": "paretopilot-bundled-v1.1.0",
+    "device": 0
+  }
+}

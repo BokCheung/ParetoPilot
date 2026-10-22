@@ -1,111 +1,126 @@
-"""Genetic kernel search and interleaved OM confirmation."""
-import math
+"""Deterministic genetic loop, durable experiments, and independent confirmation."""
+from copy import deepcopy
 from pathlib import Path
 import random
 import statistics
-from .artifacts import ConfigError, fingerprint, sha, write_json
-from .backend import Evaluator
-from .config import load_config
+from .agent import load_agent, validate_proposal
+from .backend import AscendBackend, SimulationBackend, evaluate
+from .doctor import inspect_environment
 from .report import write_report
-from .space import advise, candidates, legal
+from .space import enumerate_space, legal
+from .util import TuningError, digest, file_hash, tree_hash, write_json
 
 
-def breed(config, ranked, pool, seen, rng, advice):
+def next_population(config, ranked, pool, seen, proposal, rng):
     size = config["search"]["population"]
-    if not ranked:
-        unseen = [p for p in pool if fingerprint(p) not in seen]
-        rng.shuffle(unseen)
-        return unseen[:size]
-    children = [t["params"] for t in ranked[:min(2, size-1)]]
-    def parent():
-        return min(rng.choices(ranked, k=3), key=lambda t: t["duration_us"])["params"]
-    for _ in range(size*30):
-        if len(children) >= size-1:
-            break
-        a, b = parent(), parent()
-        child = {n: rng.choice([a[n], b[n]]) for n in config["space"]}
-        for name in child:
-            rate = config["search"]["mutation_rate"] * (2 if name in advice["priority"][:2] else 1)
-            if rng.random() < min(1, rate):
-                child[name] = rng.choice(advice["ranges"][name])
-        if legal(child, config) and fingerprint(child) not in seen and child not in children:
-            children.append(child)
-        if len(children) >= size-1:
-            break
-    unseen = [p for p in pool if fingerprint(p) not in seen and p not in children]
+    population = [t["params"] for t in ranked[:min(2, size-1)]]
+    if ranked:
+        def parent():
+            return min(rng.choices(ranked, k=3), key=lambda t: t["duration_us"])["params"]
+        for _ in range(size*40):
+            if len(population) >= size-1:
+                break
+            a, b = parent(), parent()
+            child = {k: rng.choice([a[k], b[k]]) for k in config["space"]}
+            for k in child:
+                if child[k] not in proposal["space"][k] or rng.random() < min(1, config["search"]["mutation_rate"]*(2 if k in proposal.get("priority", []) else 1)):
+                    child[k] = rng.choice(proposal["space"][k])
+            if legal(child, config) and digest(child) not in seen and child not in population:
+                population.append(child)
+    unseen = [p for p in pool if digest(p) not in seen and p not in population]
     rng.shuffle(unseen)
-    children.extend(unseen[:max(0, size-len(children))])
-    return children
+    population.extend(unseen[:max(0, size-len(population))])
+    return population
 
 
-def confirm(evaluator, config, winner):
+def confirmation(config, winner, backend, root):
     trials = []
     if winner:
-        for index in range(config["search"]["confirm_rounds"]):
-            for role in (("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline")):
-                params = config["baseline_params"] if role == "baseline" else winner["params"]
-                trials.append(evaluator.evaluate(params, f"confirmation/{index:03d}-{role}", role))
+        for i in range(config["measurement"]["confirmation_rounds"]):
+            for role in (("baseline", "candidate") if i % 2 == 0 else ("candidate", "baseline")):
+                trial = evaluate(backend, config, {} if role == "baseline" else winner["params"], root/f"confirmation/{i:03d}-{role}", role)
+                trials.append(trial)
+                write_json(root/"confirmation.json", trials)
     if not trials or any(t["status"] != "ok" for t in trials):
-        return trials, False, None, None
-    baseline = [t["duration_us"] for t in trials if t["role"] == "baseline"]
-    candidate = [t["duration_us"] for t in trials if t["role"] == "candidate"]
-    gain = 1-statistics.median(candidate)/statistics.median(baseline)
-    noise = max((max(v)-min(v))/statistics.median(v) for v in (baseline, candidate))
-    return trials, gain > max(noise, config["search"]["min_relative_gain"]), gain, noise
+        return {"accepted": False, "reason": "no valid candidate or confirmation failed", "trials": trials}
+    b = [t["duration_us"] for t in trials if t["role"] == "baseline"]
+    c = [t["duration_us"] for t in trials if t["role"] == "candidate"]
+    bm, cm = statistics.median(b), statistics.median(c)
+    gain = 1-cm/bm
+    spread = max((max(v)-min(v))/statistics.median(v) for v in (b, c))
+    accepted = gain > max(spread, config["search"]["min_gain"])
+    return {"accepted": accepted, "reason": "gain exceeds minimum threshold and observed range" if accepted else "gain insufficient versus threshold/noise",
+            "baseline_us": bm, "candidate_us": cm, "speedup": bm/cm, "relative_gain": gain, "relative_range": spread, "trials": trials}
 
 
-def tune_kernel(config_path, output):
-    config = load_config(config_path)
+def run(config, output, progress=None, baseline_only=False):
     root = Path(output).resolve()
     if root.exists() and (not root.is_dir() or any(root.iterdir())):
-        raise ConfigError("Output must be a new or empty directory")
-    pool = candidates(config)
-    if not pool or not legal(config["baseline_params"], config):
-        raise ConfigError("No legal candidates or invalid baseline template parameters")
+        raise TuningError("Output directory must be empty; choose a new run directory")
+    original_pool = enumerate_space(config)
+    if not original_pool:
+        raise TuningError("No legal template configurations")
     root.mkdir(parents=True, exist_ok=True)
-    manifest = {"format_version": 1, "config": config, "baseline_sha256": sha(config["baseline_source"]),
-                "kernel_sha256": sha(config["kernel_source"]), "adapter_files": {x: sha(x) for x in config["adapter"] if Path(x).is_file()}, "legal_candidates": len(pool)}
-    write_json(root / "manifest.json", manifest)
-    for key in ("baseline_source", "kernel_source"):
-        (root / f"{key}.snapshot").write_bytes(Path(config[key]).read_bytes())
-    evaluator = Evaluator(config, root)
-    baseline = evaluator.evaluate(config["baseline_params"], "baseline", "baseline")
+    sources = Path(__file__).parent
+    manifest = {"format_version": 1, "config": config, "controller_and_kernels_sha256": tree_hash(sources), "legal_candidates": len(original_pool)}
+    if config["baseline"]["kind"] == "python":
+        path = Path(config["baseline"]["path"])
+        manifest["baseline_source_sha256"] = file_hash(path)
+        (root/"baseline_source.py").write_bytes(path.read_bytes())
+    if config["agent"]["kind"] == "python":
+        manifest["agent_source_sha256"] = file_hash(config["agent"]["path"])
+    write_json(root/"manifest.json", manifest)
+    if config["backend"] == "ascend":
+        environment = inspect_environment(config)
+        write_json(root/"environment.json", environment)
+        if not environment["ready"]:
+            raise TuningError(f"Environment checks failed; see {root/'environment.json'} and run doctor")
+    backend = AscendBackend(config, root) if config["backend"] == "ascend" else SimulationBackend(config, root)
+    baseline = evaluate(backend, config, {}, root/"baseline", "baseline")
     if baseline["status"] != "ok":
-        raise ConfigError(f"Baseline failed; inspect baseline/trial.json: {baseline.get('error')}")
+        raise TuningError(f"Baseline failed: {baseline['error']}")
+    if baseline_only:
+        write_json(root/"baseline_summary.json", baseline)
+        return {"mode": config["backend"], "baseline_us": baseline["duration_us"], "report": str(root/"baseline_summary.json")}
+    agent = load_agent(config["agent"])
     rng = random.Random(config["search"]["seed"])
-    population = rng.sample(pool, min(len(pool), config["search"]["population"]))
-    if config["baseline_params"] in pool:
-        population[0] = config["baseline_params"].copy()
-    seen, history, domains = set(), [], []
-    previous, stalled = math.inf, 0
+    history, decisions, seen, population = [], [], set(), []
     for generation in range(config["search"]["generations"]):
-        for params in population:
-            key = fingerprint(params)
-            if key in seen or len(seen) >= config["search"]["max_evaluations"]:
-                continue
-            trial = evaluator.evaluate(params, f"trials/{len(seen):05d}")
-            trial["generation"] = generation
-            seen.add(key)
-            history.append(trial)
-            write_json(root / "history.json", history)
         ranked = sorted((t for t in history if t["status"] == "ok"), key=lambda t: t["duration_us"])
-        if len(seen) >= min(len(pool), config["search"]["max_evaluations"]):
+        context = {"schema_version": 1, "generation": generation, "operator": config["operator"], "hardware": config["hardware"],
+                   "original_space": config["space"], "baseline": baseline, "best": ranked[0] if ranked else None,
+                   "roofline": ranked[0]["roofline"] if ranked else baseline["roofline"], "history": history}
+        # A local plugin cannot mutate controller state through its input.
+        proposal = validate_proposal(agent.propose(deepcopy(context)), config["space"])
+        pool = enumerate_space(config, proposal["space"])
+        if not pool:
+            raise TuningError("Agent proposal contains no legal candidates")
+        write_json(root/f"agent/{generation:03d}.input.json", context)
+        write_json(root/f"agent/{generation:03d}.output.json", proposal)
+        decisions.append(proposal)
+        population = next_population(config, ranked, pool, seen, proposal, rng)
+        fresh = [p for p in population if digest(p) not in seen]
+        if not fresh:
             break
-        advice = {"ranges": config["space"], "priority": baseline["roofline"]["parameter_priority"], "reason": "global exploration after failed candidates"}
-        if ranked:
-            stalled = stalled+1 if ranked[0]["duration_us"] >= previous else 0
-            previous = ranked[0]["duration_us"]
-            advice = advise(config, ranked[0], stalled)
-        domains.append({"generation": generation+1, **advice})
-        population = breed(config, ranked, pool, seen, rng, advice)
+        for p in fresh:
+            if len(seen) >= config["search"]["budget"]:
+                break
+            trial = evaluate(backend, config, p, root/f"trials/{len(seen):05d}", "candidate")
+            trial["generation"] = generation
+            seen.add(digest(p))
+            history.append(trial)
+            write_json(root/"history.json", history)
+            if progress:
+                progress(trial, len(seen))
+        if len(seen) >= config["search"]["budget"]:
+            break
     ranked = sorted((t for t in history if t["status"] == "ok"), key=lambda t: t["duration_us"])
     winner = ranked[0] if ranked else None
-    confirmation, accepted, gain, noise = confirm(evaluator, config, winner)
-    result = {"mode": config["mode"], "accepted": accepted, "baseline": baseline, "best_candidate": winner,
-              "selected_params": winner["params"] if accepted else config["baseline_params"], "evaluations": len(history),
-              "confirmation": confirmation, "confirmation_relative_gain": gain, "observed_relative_range": noise,
-              "space_history": domains, "report": str(root / "report.md")}
-    write_json(root / "summary.json", result)
-    write_json(root / "best_params.json", result["selected_params"])
+    final = confirmation(config, winner, backend, root)
+    result = {"mode": config["backend"], "agent": config["agent"], "baseline": baseline, "winner": winner,
+              "confirmation": final, "selected": "candidate" if final["accepted"] else "baseline",
+              "selected_params": winner["params"] if final["accepted"] else None, "history": history, "agent_decisions": decisions}
+    write_json(root/"summary.json", result)
+    write_json(root/"best_params.json", {"selected": result["selected"], "params": result["selected_params"]})
     write_report(root, result)
-    return {k: result[k] for k in ("mode", "accepted", "selected_params", "evaluations", "confirmation_relative_gain", "report")}
+    return {"mode": result["mode"], "selected": result["selected"], "evaluations": len(history), "successful_candidates": len(ranked), "accepted": final["accepted"], "report": str(root/"report.html")}

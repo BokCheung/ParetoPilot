@@ -4,14 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "paretopilot"
-version = "1.0.0"
-description = "Roofline-guided Ascend kernel genetic optimization through OM profiling"
-readme = "README.md"
+version = "1.1.0"
+description = "Offline Ascend kernel genetic tuning with OM profiling and a replaceable dummy agent"
 requires-python = ">=3.10"
 dependencies = []
+
+[project.optional-dependencies]
+ascend = ["numpy", "torch", "onnx"]
 
 [project.scripts]
 paretopilot = "paretopilot.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["paretopilot*"]
+
+[tool.setuptools.package-data]
+paretopilot = ["kernels/*.cpp", "kernels/*.h"]
