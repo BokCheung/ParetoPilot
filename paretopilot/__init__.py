@@ -1,4 +1,2 @@
-"""Analytical model-structure exploration for a fixed NPU."""
-
-__version__ = "0.3.0"
-EVALUATOR_VERSION = "roofline-v3-native-modules"
+"""Roofline-guided Ascend kernel optimization through OM profiling."""
+__version__ = "1.0.0"

@@ -1,128 +1,21 @@
-"""Per-operator analytical Roofline evaluator with an explicit traffic policy."""
-
-from __future__ import annotations
-
-from dataclasses import asdict
-
-from . import EVALUATOR_VERSION
-from .config import normalize_inputs, fingerprint
-from .graph import build_graph
-
-
-EVALUATION_SCOPE = {
-    "name": "post_sfps_model_e2e",
-    "start": "input_tensors_ready_in_device_memory",
-    "end": "model_outputs_ready",
-    "excluded": ["sfps_embedding_lookup", "sfps_table_storage", "sfps_communication", "sfps_cache"],
-}
-
-
-ASSUMPTIONS = [
-    "E2E covers model execution after SFPS: input tensors are already resident in device memory.",
-    "SFPS lookup, table weights, indices, remote transfers and caches are outside the evaluation boundary.",
-    "Model quality is unverified; no weights are loaded and no training is performed.",
-    "Serial operator execution; no inter-operator overlap or online request queueing.",
-    "Compute and memory transfer overlap ideally within each operator (maximum of their times).",
-    "Unfused operators read inputs and weights once and write outputs once to external memory; no tile reloads.",
-    "Only model-internal weights are counted. Capacity includes live input tensors and excludes compiler workspace.",
-    "Linear layers are bias-free; hidden MLP activations are ReLU and prediction heads use sigmoid.",
-    "Ready embedding inputs use their declared model-side mean/sum pooling, or no pooling for ready vectors.",
-    "Sequence encoder uses full bidirectional attention, materialized score matrices, post-norm blocks and mean pooling.",
-    "One MAC counts as two operations. Bandwidth uses decimal GB/s; capacity is in bytes.",
-    "Matrix padding affects executed work only; padded data is assumed internal, without external padding traffic.",
-    "Vector operations use documented approximate operation counts; no special-function latency model.",
-]
-
-
-def _round_up(value, alignment):
-    return (value + alignment - 1) // alignment * alignment
-
-
-def evaluate(model, npu, workload):
-    model, npu, workload = normalize_inputs(model, npu, workload)
-    graph = build_graph(model, workload)
-    return evaluate_graph(graph, model, npu, workload, ASSUMPTIONS)
-
-
-def evaluate_graph(graph, model, npu, workload, assumptions):
-    """Shared kernel for compositional models and lowered native node graphs."""
-    input_key = {"model": model, "npu": npu, "workload": workload, "evaluator_version": EVALUATOR_VERSION}
-    dtype_rates = npu["compute_tops"][model["dtype"]]
-    op_results, unsupported = [], set()
-    totals = {"compute": 0.0, "external_memory": 0.0}
-    for op in graph.operators:
-        is_view = op.kind == "view"
-        if not is_view and op.kind not in npu["supported_ops"]:
-            unsupported.add(op.kind)
-        output = graph.tensors[op.output]
-        input_bytes = sum(graph.tensors[t].size_bytes for t in op.inputs)
-        external_bytes = 0 if is_view else input_bytes + output.size_bytes + op.parameter_bytes_read
-        executed = op.useful_ops
-        if op.matrix:
-            groups, m, k, n = op.matrix
-            a = npu["matrix_alignment"]
-            executed = 2 * groups * _round_up(m, a) * _round_up(k, a) * _round_up(n, a)
-        engine = "matrix" if op.matrix else "vector"
-        rate = dtype_rates[engine] * 1e12 * npu["compute_efficiency"]
-        bandwidth = npu["memory_bandwidth_gbps"] * 1e9 * npu["bandwidth_efficiency"]
-        times = {
-            "compute": executed / rate,
-            "external_memory": external_bytes / bandwidth,
-        }
-        bound = "view" if is_view else max(times, key=times.get)
-        latency = 0 if is_view else times[bound] + npu["launch_overhead_us"] * 1e-6
-        if not is_view:
-            totals[bound] += latency
-        op_results.append({
-            "name": op.name, "kind": op.kind, "engine": engine,
-            "input_shapes": [list(graph.tensors[t].shape) for t in op.inputs],
-            "output_shape": list(output.shape),
-            "useful_ops": op.useful_ops, "executed_ops": executed,
-            "external_bytes": external_bytes,
-            "arithmetic_intensity": executed / external_bytes if external_bytes else None,
-            "useful_arithmetic_intensity": op.useful_ops / external_bytes if external_bytes else None,
-            "padding_utilization": op.useful_ops / executed if executed else 1.0,
-            "effective_compute_ops_per_second": rate,
-            "effective_bandwidth_bytes_per_second": bandwidth,
-            "compute_time_ms": times["compute"] * 1e3,
-            "external_memory_time_ms": times["external_memory"] * 1e3,
-            "latency_ms": latency * 1e3, "bottleneck": bound,
-        })
-    activation_bytes = graph.peak_activation_bytes()
-    memory_bytes = graph.weight_bytes + activation_bytes
-    violations = []
-    if unsupported:
-        violations.append("Unsupported operators: " + ", ".join(sorted(unsupported)))
-    if memory_bytes > npu["memory_capacity_bytes"]:
-        violations.append(f"Estimated memory {memory_bytes} exceeds NPU capacity {npu['memory_capacity_bytes']}")
-    latency_ms = sum(op["latency_ms"] for op in op_results)
-    adjusted = any(npu[k] != 1 for k in ("compute_efficiency", "bandwidth_efficiency")) or npu["launch_overhead_us"] != 0
-    return {
-        "candidate_id": fingerprint(model), "evaluation_id": fingerprint(input_key),
-        "evaluator_version": EVALUATOR_VERSION,
-        "evaluation_scope": EVALUATION_SCOPE,
-        "status": "infeasible" if violations else "ok", "violations": violations,
-        "quality_status": "unverified",
-        "estimate_kind": "adjusted_analytical_estimate" if adjusted else "ideal_roofline_lower_bound_under_assumptions",
-        "model": model,
-        "metrics": {
-            "latency_ms": latency_ms,
-            "model_e2e_latency_ms": latency_ms,
-            "samples_per_second": workload["batch_size"] * 1e3 / latency_ms if latency_ms else None,
-            "parameter_count": graph.parameter_count, "weight_bytes": graph.weight_bytes,
-            "peak_activation_bytes": activation_bytes, "peak_memory_bytes": memory_bytes,
-            "input_tensor_bytes": sum(t.size_bytes for t in graph.tensors.values() if t.external),
-            "useful_ops": sum(o["useful_ops"] for o in op_results),
-            "executed_ops": sum(o["executed_ops"] for o in op_results),
-            "external_bytes": sum(o["external_bytes"] for o in op_results),
-            "operator_count": len(op_results),
-        },
-        "bottleneck_time_ms": {key: val * 1e3 for key, val in totals.items()},
-        "operators": op_results,
-        "graph": {"tensors": {key: {**asdict(tensor), "shape": list(tensor.shape)}
-                              for key, tensor in graph.tensors.items()},
-                  "operators": [{**asdict(op), "matrix": list(op.matrix) if op.matrix else None}
-                                for op in graph.operators],
-                  "parameter_counts": graph.parameters, "outputs": graph.outputs},
-        "assumptions": assumptions,
-    }
+"""Keep mathematical minimum traffic distinct from profiling measurements."""
+def analyze(config, duration_us=None, measured_bytes=None):
+    op, hw = config["operator"], config["hardware"]
+    size = 4 if op["dtype"] == "float32" else 2
+    if op["kind"] == "matmul":
+        m, n, k = (op[x] for x in ("m", "n", "k"))
+        flops, minimum = 2*m*n*k, size*(m*k+k*n+m*n)
+    else:
+        flops = op["numel"] * op["flops_per_element"]
+        minimum = op["numel"] * size * (op["input_count"]+1)
+    traffic = minimum if measured_bytes is None else measured_bytes
+    compute, memory = flops/hw["peak_flops"], traffic/hw["bandwidth_bytes_s"]
+    bound = "compute" if compute >= memory else "memory"
+    if op["kind"] == "matmul":
+        priority = ["tile_m", "tile_n", "tile_k"] if bound == "compute" else ["tile_k", "buffers", "tile_m"]
+    else:
+        priority = ["tile_elems", "buffers", "block_dim"]
+    return {"flops": flops, "minimum_bytes": minimum, "measured_bytes": measured_bytes,
+            "traffic_basis": "shape_lower_bound" if measured_bytes is None else "profiling",
+            "arithmetic_intensity": flops/traffic, "ideal_lower_bound_us": max(compute, memory)*1e6,
+            "task_duration_us": duration_us, "bottleneck_hypothesis": bound, "parameter_priority": priority}

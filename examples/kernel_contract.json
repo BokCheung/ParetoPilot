@@ -1,0 +1,6 @@
+{
+  "status": "contract_only_not_a_deployable_kernel",
+  "matmul_parameters": ["tile_m", "tile_n", "tile_k", "buffers", "block_dim"],
+  "elementwise_parameters": ["tile_elems", "buffers", "block_dim"],
+  "requirements": ["Provide CANN-version-matched Host tiling and Device sources", "Inject parameters through registered custom operators", "Validate L0/L1/UB resources, layout, precision and tails", "Archive evidence that ATC selected this candidate"]
+}

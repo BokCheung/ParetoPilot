@@ -1,5 +1,0 @@
-{
-  "batch_size": 32,
-  "embedding_lengths": {},
-  "sequence_length": 20
-}

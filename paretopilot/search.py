@@ -1,156 +1,111 @@
-"""Bounded, reproducible discrete search with constraint-aware Pareto selection."""
-
-from __future__ import annotations
-
-import copy
+"""Genetic kernel search and interleaved OM confirmation."""
 import math
+from pathlib import Path
 import random
-
-from .agent import ExperimentAgent
-from .config import ConfigError, fingerprint, normalize_inputs, set_path, validate_model, validate_search
-from .roofline import evaluate
-from .store import CacheError
-
-
-def pareto_front(results):
-    feasible = [r for r in results if r["status"] == "ok" and not r.get("search_violations")]
-    front = []
-    for result in feasible:
-        a = result["metrics"]
-        dominated = False
-        for other in feasible:
-            b = other["metrics"]
-            if (b["latency_ms"] <= a["latency_ms"] and b["peak_memory_bytes"] <= a["peak_memory_bytes"]
-                    and (b["latency_ms"] < a["latency_ms"] or b["peak_memory_bytes"] < a["peak_memory_bytes"])):
-                dominated = True
-                break
-        if not dominated:
-            front.append(result)
-    return sorted(front, key=lambda r: (r["metrics"]["latency_ms"], r["metrics"]["peak_memory_bytes"], r["candidate_id"]))
+import statistics
+from .artifacts import ConfigError, fingerprint, sha, write_json
+from .backend import Evaluator
+from .config import load_config
+from .report import write_report
+from .space import advise, candidates, legal
 
 
-def diff_config(baseline, candidate, prefix=""):
-    if isinstance(baseline, dict) and isinstance(candidate, dict):
-        changes = {}
-        for key in sorted(baseline.keys() | candidate.keys()):
-            path = prefix + "." + key if prefix else key
-            changes.update(diff_config(baseline.get(key), candidate.get(key), path))
-        return changes
-    if isinstance(baseline, list) and isinstance(candidate, list) and len(baseline) == len(candidate):
-        changes = {}
-        for i, (a, b) in enumerate(zip(baseline, candidate)):
-            changes.update(diff_config(a, b, f"{prefix}.{i}"))
-        return changes
-    return {} if baseline == candidate else {prefix: {"before": baseline, "after": candidate}}
+def breed(config, ranked, pool, seen, rng, advice):
+    size = config["search"]["population"]
+    if not ranked:
+        unseen = [p for p in pool if fingerprint(p) not in seen]
+        rng.shuffle(unseen)
+        return unseen[:size]
+    children = [t["params"] for t in ranked[:min(2, size-1)]]
+    def parent():
+        return min(rng.choices(ranked, k=3), key=lambda t: t["duration_us"])["params"]
+    for _ in range(size*30):
+        if len(children) >= size-1:
+            break
+        a, b = parent(), parent()
+        child = {n: rng.choice([a[n], b[n]]) for n in config["space"]}
+        for name in child:
+            rate = config["search"]["mutation_rate"] * (2 if name in advice["priority"][:2] else 1)
+            if rng.random() < min(1, rate):
+                child[name] = rng.choice(advice["ranges"][name])
+        if legal(child, config) and fingerprint(child) not in seen and child not in children:
+            children.append(child)
+        if len(children) >= size-1:
+            break
+    unseen = [p for p in pool if fingerprint(p) not in seen and p not in children]
+    rng.shuffle(unseen)
+    children.extend(unseen[:max(0, size-len(children))])
+    return children
 
 
-def constraint_violations(result, baseline_params, constraints):
-    metrics = result["metrics"]
-    ratio = metrics["parameter_count"] / baseline_params
-    lo, hi = constraints["parameter_ratio"]
-    violations = []
-    if not lo <= ratio <= hi:
-        violations.append(f"Parameter ratio {ratio:.6g} outside [{lo}, {hi}]")
-    if metrics["latency_ms"] > constraints.get("max_latency_ms", math.inf):
-        violations.append("Latency exceeds search limit")
-    if metrics["peak_memory_bytes"] > constraints.get("max_memory_bytes", math.inf):
-        violations.append("Memory exceeds search limit")
-    return violations
+def confirm(evaluator, config, winner):
+    trials = []
+    if winner:
+        for index in range(config["search"]["confirm_rounds"]):
+            for role in (("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline")):
+                params = config["baseline_params"] if role == "baseline" else winner["params"]
+                trials.append(evaluator.evaluate(params, f"confirmation/{index:03d}-{role}", role))
+    if not trials or any(t["status"] != "ok" for t in trials):
+        return trials, False, None, None
+    baseline = [t["duration_us"] for t in trials if t["role"] == "baseline"]
+    candidate = [t["duration_us"] for t in trials if t["role"] == "candidate"]
+    gain = 1-statistics.median(candidate)/statistics.median(baseline)
+    noise = max((max(v)-min(v))/statistics.median(v) for v in (baseline, candidate))
+    return trials, gain > max(noise, config["search"]["min_relative_gain"]), gain, noise
 
 
-def run_search(model, npu, workload, search, store=None, progress=None):
-    model, npu, workload = normalize_inputs(model, npu, workload)
-    spec = validate_search(search, model)
-    agent, rng = ExperimentAgent(), random.Random(spec["seed"])
-    parameters = dict(sorted(spec["parameters"].items()))
-    paths = list(parameters)
-    radices = [len(parameters[p]) for p in paths]
-    space_size = math.prod(radices)
-    results, trials, visited = [], [], set()
-    seen_models = set()
-    cursor = 0
-
-    def evaluate_cached(candidate):
-        return store.evaluate(candidate, npu, workload, evaluate) if store else evaluate(candidate, npu, workload)
-
-    baseline = evaluate_cached(model)
-    base_params = baseline["metrics"]["parameter_count"]
-
-    def record(candidate, decision, result=None):
-        candidate_id = fingerprint(candidate)
-        try:
-            normalized = validate_model(candidate)
-            result = copy.deepcopy(result if result is not None else evaluate_cached(normalized))
-            result["search_violations"] = constraint_violations(result, base_params, spec["constraints"])
-            results.append(result)
-            trial = {"candidate_id": result["candidate_id"], "evaluation_id": result["evaluation_id"],
-                     "status": result["status"] if not result["search_violations"] else "constraint_rejected",
-                     "metrics": result["metrics"], "violations": result["violations"] + result["search_violations"]}
-        except CacheError:
-            raise
-        except ConfigError as exc:
-            trial = {"candidate_id": candidate_id, "status": "invalid", "violations": [str(exc)]}
-        trial.update({"trial": len(trials), "decision": decision,
-                      "config_diff": diff_config(model, candidate)})
-        trials.append(trial)
-        seen_models.add(candidate_id)
-        if store:
-            store.checkpoint(trials)
-        if progress:
-            progress(trial)
-
-    record(model, {"kind": "baseline"}, baseline)
-
-    def decode(index):
-        values = [0] * len(radices)
-        for i in range(len(radices) - 1, -1, -1):
-            index, values[i] = divmod(index, radices[i])
-        return values
-
-    def encode(indices):
-        index = 0
-        for size, value in zip(radices, indices):
-            index = index * size + value
-        return index
-
-    while len(trials) < spec["max_evaluations"] and len(visited) < space_size:
-        index, decision = None, {"kind": spec["method"]}
-        if spec["method"] != "grid":
-            for _ in range(64):
-                if spec["method"] == "adaptive" and results and rng.random() >= spec["exploration_probability"]:
-                    parents = pareto_front(results) or results
-                    proposal = agent.mutate(rng.choice(parents), parameters, rng)
-                    if proposal:
-                        indices, decision = proposal
-                        index = encode(indices)
-                    else:
-                        index, decision = rng.randrange(space_size), {"kind": "random_exploration"}
-                else:
-                    index, decision = rng.randrange(space_size), {"kind": "random_exploration"}
-                if index not in visited:
-                    break
-                index = None
-        if index is None:
-            while cursor in visited:
-                cursor += 1
-            index = cursor
-            decision = {"kind": "grid" if spec["method"] == "grid" else "unvisited_fallback"}
-        visited.add(index)
-        candidate = copy.deepcopy(model)
-        for path, choice in zip(paths, decode(index)):
-            set_path(candidate, path, parameters[path][choice])
-        if fingerprint(candidate) in seen_models:
-            continue
-        record(candidate, decision)
-
-    front = pareto_front(results)
-    return {
-        "search_spec": spec, "baseline": baseline, "trials": trials,
-        "pareto": front, "diagnosis": agent.diagnose(baseline, parameters),
-        "summary": {"trials": len(trials), "valid_evaluations": len(results),
-                    "feasible": sum(r["status"] == "ok" and not r["search_violations"] for r in results),
-                    "pareto_count": len(front), "discrete_space_size": space_size,
-                    "stop_reason": "space_exhausted" if len(visited) == space_size else "budget_reached",
-                    "cache_hits": store.cache_hits if store else 0},
-        "quality_status": "unverified",
-    }
+def tune_kernel(config_path, output):
+    config = load_config(config_path)
+    root = Path(output).resolve()
+    if root.exists() and (not root.is_dir() or any(root.iterdir())):
+        raise ConfigError("Output must be a new or empty directory")
+    pool = candidates(config)
+    if not pool or not legal(config["baseline_params"], config):
+        raise ConfigError("No legal candidates or invalid baseline template parameters")
+    root.mkdir(parents=True, exist_ok=True)
+    manifest = {"format_version": 1, "config": config, "baseline_sha256": sha(config["baseline_source"]),
+                "kernel_sha256": sha(config["kernel_source"]), "adapter_files": {x: sha(x) for x in config["adapter"] if Path(x).is_file()}, "legal_candidates": len(pool)}
+    write_json(root / "manifest.json", manifest)
+    for key in ("baseline_source", "kernel_source"):
+        (root / f"{key}.snapshot").write_bytes(Path(config[key]).read_bytes())
+    evaluator = Evaluator(config, root)
+    baseline = evaluator.evaluate(config["baseline_params"], "baseline", "baseline")
+    if baseline["status"] != "ok":
+        raise ConfigError(f"Baseline failed; inspect baseline/trial.json: {baseline.get('error')}")
+    rng = random.Random(config["search"]["seed"])
+    population = rng.sample(pool, min(len(pool), config["search"]["population"]))
+    if config["baseline_params"] in pool:
+        population[0] = config["baseline_params"].copy()
+    seen, history, domains = set(), [], []
+    previous, stalled = math.inf, 0
+    for generation in range(config["search"]["generations"]):
+        for params in population:
+            key = fingerprint(params)
+            if key in seen or len(seen) >= config["search"]["max_evaluations"]:
+                continue
+            trial = evaluator.evaluate(params, f"trials/{len(seen):05d}")
+            trial["generation"] = generation
+            seen.add(key)
+            history.append(trial)
+            write_json(root / "history.json", history)
+        ranked = sorted((t for t in history if t["status"] == "ok"), key=lambda t: t["duration_us"])
+        if len(seen) >= min(len(pool), config["search"]["max_evaluations"]):
+            break
+        advice = {"ranges": config["space"], "priority": baseline["roofline"]["parameter_priority"], "reason": "global exploration after failed candidates"}
+        if ranked:
+            stalled = stalled+1 if ranked[0]["duration_us"] >= previous else 0
+            previous = ranked[0]["duration_us"]
+            advice = advise(config, ranked[0], stalled)
+        domains.append({"generation": generation+1, **advice})
+        population = breed(config, ranked, pool, seen, rng, advice)
+    ranked = sorted((t for t in history if t["status"] == "ok"), key=lambda t: t["duration_us"])
+    winner = ranked[0] if ranked else None
+    confirmation, accepted, gain, noise = confirm(evaluator, config, winner)
+    result = {"mode": config["mode"], "accepted": accepted, "baseline": baseline, "best_candidate": winner,
+              "selected_params": winner["params"] if accepted else config["baseline_params"], "evaluations": len(history),
+              "confirmation": confirmation, "confirmation_relative_gain": gain, "observed_relative_range": noise,
+              "space_history": domains, "report": str(root / "report.md")}
+    write_json(root / "summary.json", result)
+    write_json(root / "best_params.json", result["selected_params"])
+    write_report(root, result)
+    return {k: result[k] for k in ("mode", "accepted", "selected_params", "evaluations", "confirmation_relative_gain", "report")}
