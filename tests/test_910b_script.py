@@ -191,20 +191,30 @@ class ScriptTests(unittest.TestCase):
 
     def test_offline_install_never_sets_remote_index(self):
         self.args.deps="offline"
-        self.args.wheelhouse=self.root/"wheels with spaces"
-        self.args.wheelhouse.mkdir()
+        wheelhouse=self.root/"wheels with spaces"
+        wheelhouse.mkdir()
+        (self.root/"path alias").mkdir()
         self.args.venv=self.root/"environment"
         (self.args.venv/"bin").mkdir(parents=True)
         (self.args.venv/"bin/python").write_text("placeholder")
-        session=script.Session(self.root,self.args)
-        commands=[]
-        session.run=lambda name,argv:commands.append(argv)
-        with patch.object(script.sys,"version_info",(3,12,0)):
-            script.prepare_python(session,self.args)
-        install=commands[-1]
-        self.assertIn("--no-index",install)
-        self.assertIn(str(self.args.wheelhouse),install)
-        self.assertFalse(any("https://" in x for x in install))
+        for path in (wheelhouse, self.root/"path alias"/".."/wheelhouse.name):
+            with self.subTest(wheelhouse=path):
+                self.args.wheelhouse=path
+                session=script.Session(self.root,self.args)
+                commands=[]
+                session.run=lambda name,argv:commands.append((name,argv))
+                with patch.object(script.sys,"version_info",(3,12,0)):
+                    script.prepare_python(session,self.args)
+                # Select the installation stage, regardless of when version checks run.
+                installs=[argv for name,argv in commands if name=="install-offline-deps"]
+                self.assertEqual(len(installs),1,
+                                 f"Expected one offline install; loaded {script.__file__}; recorded {commands!r}")
+                self.assertFalse(any(name in {"install-deps","install-torch"} for name,_ in commands))
+                install=installs[0]
+                self.assertIn("--no-index",install)
+                self.assertIn("--find-links",install)
+                self.assertEqual(Path(install[install.index("--find-links")+1]).resolve(),wheelhouse.resolve())
+                self.assertFalse(any(x in {"--index-url","--extra-index-url"} or x.startswith(("http://","https://")) for x in install))
 
     def test_source_archive_includes_script_and_requirements(self):
         target=self.root/"package.zip"
