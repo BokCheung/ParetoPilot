@@ -2,11 +2,12 @@
 
 日期：2026-10-22。环境：Windows、Python 3.12.14。
 
-`python -m unittest discover -s tests -v`：41 项全部通过，无跳过。
+`python -m unittest discover -s tests -v`：48 项全部通过，无跳过。
 
 - 核心：配置约束、Roofline 公式和流量口径、Dummy 不调整参数域、插件域验证。
 - 搜索：固定 seed 可复现、参数去重和预算、失败候选、噪声/小收益回退、已有输出保护。
 - 采样：精确筛选、中位数、重复导出、混合节点、NaN 拒绝。
+- CANN CSV 兼容：新增 7 项测试，使用测试机提供的 Add 表头和两条记录验证 `OP Type`、`Stream ID`、`Model ID` 等别名；Task Duration 中位数为 8.49 μs。同时验证新旧配置互通、混合标识拒绝、重复/缺失列诊断和 inspect-profile 输出。该 CSV 回放不代表完整上板流程已通过。
 - 原生链路合同：构建参数注入、独立 OPP、参数签名缺失、OM 被替换时拦截。
 - PyACL mock：预热排除、ND padding、错误输出停止、设备调用失败清理。
 - 实际 CPU 导出：内置 MatMul、Add 和外部 Python 基线的 PyTorch→ONNX 导出及 ONNX schema 检查。
@@ -19,4 +20,4 @@
 
 另外已跑通 MatMul、Add 两套模拟搜索，每套 12 个候选，生成完整报告。模拟数据与 PyACL mock 不代表 NPU 计算结果。
 
-**尚未验证**：910B 上的 Ascend C 编译、OPP 注册、ATC 自定义节点转换、真实 PyACL 推理/精度和 msprof CSV，以及硬件性能收益。交付中含完成这些阶段所需的源代码和启动命令，按 DEPLOYMENT.md 先运行 smoke 验收。
+**本机尚未验证**：910B 上的 Ascend C 编译、OPP 注册、ATC 自定义节点转换、真实 PyACL 推理/精度、完整 msprof 采集导出链路，以及硬件性能收益。交付中含完成这些阶段所需的源代码和启动命令，按 DEPLOYMENT.md 先运行 smoke 验收。

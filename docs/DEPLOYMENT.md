@@ -127,6 +127,10 @@ smoke 只搜索一个候选、做两轮交错复测，成功后再扩预算。�
 
 ## 4. profiling 目标名称不匹配
 
+`op_summary` 的列名兼容 `OP Type` / `Op Type`、`Stream ID` / `Stream Id`、`Model ID` / `Model Id` 和设备 ID 的已知写法，原配置可继续使用。算子名称和值仍精确匹配，`Task Duration(us)` 仍为微秒耗时；不会用 aicore_time/aiv_time 等不同指标代替。跨 stream/model/device 的混合采样仍会拒绝。
+
+若收到 `Profiling CSV missing required columns`，错误会同时列出文件路径、缺失字段和实际表头。先用下面的 inspect-profile 查看 `columns` 原始表头及 `tasks` 标准化后的标识。不要修改原 CSV 来绕过校验；重复或冲突的列名也会拒绝。
+
 若收到 Expected exactly ... target task samples，先找到日志中该试验的 profiler/ 下 op_summary*.csv。可执行：
 
 ```bash

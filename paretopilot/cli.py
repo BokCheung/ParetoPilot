@@ -1,14 +1,12 @@
 import argparse
-import csv
 import json
-from pathlib import Path
 import sys
 import subprocess
 from . import __version__
 from .config import load_config
 from .doctor import inspect_environment
 from .package import create_package
-from .profiling import read_profile
+from .profiling import inspect_profiles, read_profile
 from .roofline import analyze
 from .search import run
 from .space import enumerate_space
@@ -44,18 +42,7 @@ def main(argv=None):
         if args.command == "package":
             result = create_package(args.output)
         elif args.command == "inspect-profile":
-            result = []
-            for file in args.csv:
-                counts = {}
-                with Path(file).open(encoding="utf-8-sig", newline="") as stream:
-                    reader = csv.DictReader(stream)
-                    columns = [k for k in ("Op Name", "Op Type", "Device_id", "Device Id", "Stream Id", "Model Id") if k in (reader.fieldnames or [])]
-                    if not columns:
-                        raise TuningError(f"No task identifier columns in {file}")
-                    for row in reader:
-                        key = tuple(row[k] for k in columns)
-                        counts[key] = counts.get(key, 0)+1
-                result.append({"file": file, "tasks": [{**dict(zip(columns,k)), "samples": v} for k,v in counts.items()]})
+            result = inspect_profiles(args.csv)
         else:
             c = load_config(args.config)
             if args.command == "validate":
