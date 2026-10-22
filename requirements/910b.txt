@@ -1,0 +1,18 @@
+# Python 3.10-3.12; keep CANN 8.5's NumPy and Protobuf constraints.
+# torch==2.7.1 is installed separately from the CPU index, or local wheels.
+numpy==1.26.4
+protobuf==3.20.3
+onnx==1.16.1
+setuptools>=68
+wheel
+attrs
+cython
+decorator>=4.4.0
+sympy>=1.13.3
+cffi>=1.12.3
+pyyaml
+pathlib2
+psutil
+scipy
+requests
+absl-py

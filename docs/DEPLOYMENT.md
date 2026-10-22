@@ -1,5 +1,67 @@
 # 910B / CANN 8.5.0 测试机部署
 
+## 一键测试（推荐）
+
+前提：Linux、已安装且可用的 910B 驱动、CANN 8.5.0 Toolkit 和 910B ops 包，以及 bash、cmake、g++、make、npu-smi。脚本不安装驱动或 CANN。选择与本机 PyACL 匹配的 Python；自动安装依赖支持 Python 3.10–3.12。
+
+首次拉取并运行：
+
+```bash
+git clone https://github.com/BokCheung/ParetoPilot.git
+cd ParetoPilot
+python3 scripts/test_910b.py \
+  --cann-path /usr/local/Ascend/cann \
+  --soc Ascend910B1 \
+  --device 0
+```
+
+已有仓库先执行 `git pull --ff-only`。`Ascend910B1` 必须替换为实际型号。无需先手动 source CANN：脚本读取指定安装树的版本记录，调用其 set_env.sh，把环境传给后续子进程。无需 Agent API 或 torch_npu。
+
+默认流程：CANN 路径/版本与工具检查 → npu-smi → Python 虚拟环境和依赖 → doctor → 单元测试 → Add/MatMul 模拟闭环 → 两个真实基线 → 两个单核保守参数 smoke → 两个完整搜索 → 结果验收与诊断包。首次运行可能需要下载依赖，编译耗时取决于测试机。
+
+```bash
+# 只做首次上板试跑，包含前置测试、两侧基线和两个 smoke
+python3 scripts/test_910b.py --cann-path /usr/local/Ascend/cann \
+  --soc Ascend910B1 --device 0 --scope smoke
+
+# 复用当前 Python 环境：不创建虚拟环境，不安装依赖
+/path/to/python3.10 scripts/test_910b.py --cann-path /usr/local/Ascend/cann \
+  --soc Ascend910B1 --device 0 --deps check
+
+# 离线安装：wheelhouse 须包含 requirements/910b.txt 和 torch==2.7.1 的全部依赖
+python3 scripts/test_910b.py --cann-path /usr/local/Ascend/cann \
+  --soc Ascend910B1 --device 0 --deps offline --wheelhouse /data/wheels
+
+# 旧目录布局或独立环境脚本
+python3 scripts/test_910b.py \
+  --cann-path /usr/local/Ascend/ascend-toolkit/latest \
+  --cann-env /usr/local/Ascend/ascend-toolkit/set_env.sh \
+  --soc Ascend910B1 --device 0 --scope smoke
+
+python3 scripts/test_910b.py --help
+```
+
+| 参数 | 用途 |
+| --- | --- |
+| --cann-path | 必填，安装根目录或旧布局的 latest；也接受含 latest 的 ascend-toolkit 目录 |
+| --cann-env | 可选，set_env.sh 的显式路径 |
+| --soc / --device | 必填具体 SoC；设备 ID 默认 0 |
+| --scope full / smoke | 默认 full；smoke 完成全部前置验证后结束，不做完整搜索 |
+| --deps install / offline / check | 默认 install；install/offline 使用独立虚拟环境，check 使用启动脚本的解释器 |
+| --wheelhouse | offline 必填；不访问包索引，wheels 必须匹配 Linux 架构和 Python ABI |
+| --venv | 安装模式的虚拟环境目录，默认项目下 .venv-910b；已有环境须匹配当前 Python 小版本 |
+| --output | 新建或空输出目录；省略时自动创建 runs/910b-随机标识 |
+| --config-dir | 配置来源目录，默认 examples；需包含 ascend910b_add.json 和 ascend910b_matmul.json |
+| --timeout | 每个编译/ATC/运行子进程超时秒数，默认 1800，不是整个测试套件的时限 |
+
+脚本把配置复制到本次输出的 config/，覆盖 SoC、设备、Dummy Agent 和阶段超时；不会修改原始 examples。smoke 的参数取各域第一个值，block_dim 固定为 1；full 使用原域。硬件峰值和域上限仍须按真实机器填写，示例硬件值不变成实测规格。
+
+`test-summary.json` 的 status=passed 且进程退出码 0 才表示本次范围内的验收通过。脚本拒绝模拟冒充真机、正确性失败、复测数量/顺序不符以及单元测试跳过；即使底层 run 返回 0，也会额外检查全部交错复测。候选没有足够收益而选择 baseline 不影响流程通过。完整搜索允许个别非法/失败候选，但至少一个候选和优胜者的全部复测必须成功。
+
+失败退出码为 2；中断为 130。每阶段都有独立 .log，状态文件记录命令及退出码。成功或失败后自动生成 diagnostics.zip，包含配置、阶段日志、JSON/CSV 和报告；不包含虚拟环境、生成工程、OPP 二进制、OM 和输入张量。完整产物仍在原目录。失败后可按日志修正配置，换新输出目录重跑，不覆盖已有试验，不自动续跑。脚本不保存整个进程环境，避免把环境中的凭据写入诊断包。
+
+自动安装采用 `requirements/910b.txt`，从 CPU 索引安装 torch==2.7.1。依赖约束参照 [CANN 8.5 运行依赖](https://www.hiascend.com/doc_center/source/en/canncommercial/850/softwareinst/instg/instg_0045.html)：Python 3.13 以下使用 NumPy 1.x、Protobuf 3.20.x。[CANN 8.5 路径变化说明](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/850/releasenote/releasenote_0000.html)介绍新路径及旧路径兼容性。以下为需要逐步排查时的手动命令。
+
 ## 1. 准备环境
 
 使用 Linux 测试机。需要匹配设备驱动的 CANN 8.5.0 Toolkit、910B 算子包、Ascend C 编译器、msopgen、msprof、ATC、PyACL，以及 bash、g++、CMake。只装运行库不足以编译候选。
@@ -7,7 +69,7 @@
 解压源代码包，在其 ParetoPilot 根目录操作。按实际安装路径加载环境，例如：
 
 ```bash
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/cann/set_env.sh
 npu-smi info
 python --version
 which atc msopgen msprof cmake g++
@@ -20,13 +82,15 @@ Python 要求 3.10+，且须与已安装的 PyACL ABI 兼容。保留 CANN 设�
 有网络时，在测试机对应架构的 Python 环境安装导出依赖：
 
 ```bash
-python -m pip install numpy torch onnx
+python -m pip install -r requirements/910b.txt
+python -m pip install 'torch==2.7.1' --index-url https://download.pytorch.org/whl/cpu
 ```
 
 PyTorch 只在 CPU 上生成参考输出和 ONNX，不要求 torch_npu。离线机器需提前准备与 Linux 架构、Python 版本匹配的 wheels，再执行：
 
 ```bash
-python -m pip install --no-index --find-links /path/to/wheels numpy torch onnx
+python -m pip install --no-index --find-links /path/to/wheels \
+  -r requirements/910b.txt 'torch==2.7.1'
 ```
 
 源码目录可直接使用 python -m paretopilot，不必安装本项目。若需要命令 paretopilot，可用 pip install --no-build-isolation --no-deps .（环境须已有 setuptools>=68）。

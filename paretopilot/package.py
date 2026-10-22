@@ -9,7 +9,7 @@ def create_package(output):
     if not (root/"examples").is_dir() or not (root/"README.md").is_file():
         raise TuningError("Run package from the source checkout, not an installed wheel")
     files = [root/"pyproject.toml", root/"README.md", root/".gitignore"]
-    for name in ("paretopilot", "examples", "docs", "tests"):
+    for name in ("paretopilot", "examples", "docs", "tests", "scripts", "requirements"):
         files += [p for p in (root/name).rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix not in (".pyc", ".pyo")]
     output = Path(output).resolve()
     if output.exists():

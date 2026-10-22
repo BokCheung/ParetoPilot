@@ -32,11 +32,26 @@ python -m paretopilot run --config examples/simulation_add.json --output runs/si
 
 ## 搬到昇腾机器
 
+在 Linux 测试机上，用能匹配 PyACL 的 Python 3.10–3.12 执行一键测试：
+
+```bash
+python3 scripts/test_910b.py \
+  --cann-path /usr/local/Ascend/cann \
+  --soc Ascend910B1 \
+  --device 0
+```
+
+按实际安装路径和芯片型号调整参数。脚本自动加载 CANN 环境、在 `.venv-910b` 安装依赖，然后执行环境检查、单元测试、两套模拟流程、真实基线、smoke 和完整搜索。只做首次试跑可添加 `--scope smoke`；复用已有 Python 依赖可添加 `--deps check`；离线安装使用 `--deps offline --wheelhouse /path/to/wheels`。
+
+结果写入独立的 `runs/910b-*` 目录，包含 `test-summary.json`、阶段日志和 `diagnostics.zip`。任何阶段或最终复测失败都会停止后续阶段；收益不足而保留基线可正常通过。完整选项见 [部署步骤](docs/DEPLOYMENT.md)。
+
+如需通过源码 ZIP 迁移：
+
 ```bash
 python -m paretopilot package --output dist/ParetoPilot-ascend-910b-cann850.zip
 ```
 
-ZIP 包含源码、算子模板、示例、文档和测试，不含本机虚拟环境、模拟结果、CANN 或 Python 第三方 wheel。拷贝解压后按 [部署步骤](docs/DEPLOYMENT.md) 执行。无需复制本机的 Windows 虚拟环境。
+ZIP 包含源码、算子模板、示例、一键脚本、依赖清单、文档和测试，不含本机虚拟环境、模拟结果、CANN 或 Python 第三方 wheel。拷贝解压后按 [部署步骤](docs/DEPLOYMENT.md) 执行。无需复制本机的 Windows 虚拟环境。
 
 ```bash
 python -m paretopilot doctor --config examples/ascend910b_add.json --output environment.json

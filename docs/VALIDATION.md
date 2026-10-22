@@ -2,7 +2,7 @@
 
 日期：2026-10-22。环境：Windows、Python 3.12.14。
 
-`python -m unittest discover -s tests -v`：24 项全部通过，无跳过。
+`python -m unittest discover -s tests -v`：41 项全部通过，无跳过。
 
 - 核心：配置约束、Roofline 公式和流量口径、Dummy 不调整参数域、插件域验证。
 - 搜索：固定 seed 可复现、参数去重和预算、失败候选、噪声/小收益回退、已有输出保护。
@@ -11,8 +11,11 @@
 - PyACL mock：预热排除、ND padding、错误输出停止、设备调用失败清理。
 - 实际 CPU 导出：内置 MatMul、Add 和外部 Python 基线的 PyTorch→ONNX 导出及 ONNX schema 检查。
 - 子进程：超时终止及命令日志；修复了 Windows venv 启动器的子进程残留问题。
+- 一键测试脚本：新增 17 项测试，覆盖 CANN 新旧目录与精确版本检查、环境脚本路径传参、配置复制、在线/离线命令生成、阶段顺序、真实结果验收、失败即停、退出码、已有输出保护及诊断包筛选。CANN 环境加载和设备阶段使用 mock 验证控制逻辑；不是 Linux/CANN 实测。
 
 本地导出测试使用 torch 2.14.1、onnx 1.23.2、numpy 2.5.4；这些是本机验证版本，不是目标 CANN 环境的强制依赖版本。目标机器优先使用兼容其 Python/PyACL/ATC 的组件组合。导出固定使用 ONNX opset 13 和 TorchScript 导出路径。
+
+`scripts/test_910b.py --help` 和 Python 编译检查通过。源码包包含一键脚本及 requirements/910b.txt。脚本默认安装的 torch 2.7.1、onnx 1.16.1、numpy 1.26.4 组合尚未在本机安装验证；Linux 的 set_env.sh 加载、该依赖组合和硬件阶段仍须在目标测试机验收。
 
 另外已跑通 MatMul、Add 两套模拟搜索，每套 12 个候选，生成完整报告。模拟数据与 PyACL mock 不代表 NPU 计算结果。
 
