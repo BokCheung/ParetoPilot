@@ -135,11 +135,29 @@ class InspectCannOperatorTests(unittest.TestCase):
         text = out.getvalue()
         self.assertEqual(code, 0)
         self.assertIn("reuse binary kernel k0", text)
-        self.assertIn("context before selection", text)
+        self.assertNotIn("context before selection", text)
         self.assertIn("/opp/impl/ops_legacy/dynamic/batch_matmul_v2.py", text)
         self.assertNotIn("WeightQuantBatchMatmulV2", text)
         self.assertNotIn("RegisterOperatorCreator", text)
         self.assertIn("Target branch matches: 2", text)
+
+    def test_branch_evidence_reaches_late_target_and_bounds_gateway_output(self):
+        (self.root/"plog.log").write_text(
+            "[ops_json_file.cc:355] CheckAndGetBoolValue flagSupportBlockDim op[BatchMatMulV2]\n"*2000+
+            "InitOpsKernelInfo: BatchMatMulV2 opkernel name is AICPUKernel\n"*2000+
+            "BatchMatMulV2 compile capability is available\n"*200+
+            "node[target] op[BatchMatMulV2] dispatch online compile kernel_name=late_kernel\n"+
+            "node[target] op[BatchMatMulV2] tiling_key=99 block_dim=24\n")
+        with redirect_stdout(io.StringIO()) as out:
+            script.branch_evidence(self.root)
+        text = out.getvalue()
+        self.assertIn("late_kernel", text)
+        self.assertIn("tiling_key=99 block_dim=24", text)
+        self.assertNotIn("AICPUKernel", text)
+        self.assertNotIn("flagSupportBlockDim", text)
+        self.assertIn("Target branch matches: 202; shown: 20", text)
+        self.assertIn("[node]", text)
+        self.assertLess(len(text.encode("utf-8")), 8000)
 
     def test_exact_operator_match_excludes_weight_quant_but_keeps_kernel_suffixes(self):
         self.assertIsNone(script.OP_MATCH.search("WeightQuantBatchMatmulV2"))

@@ -205,47 +205,48 @@ def collect_evidence(output, opened, warnings):
 
 
 def branch_evidence(output):
-    """Search full existing logs; do not reuse the truncated general excerpt."""
-    from collections import deque
+    """Scan to EOF, retaining a bounded set of the highest-signal records."""
+    import heapq
     output = Path(output).expanduser().resolve()
     paths = sorted(p for p in output.rglob("*.log") if p.name not in
                    {"trace-files.log", "cann-env.log", "strace-probe.log"})
     paths.sort(key=lambda p: ("op_compile_stats" not in p.name, "plog" not in p.name, str(p)))
     signal = re.compile(r"compil|reuse|binary|tiling|oppath|op.path|kernel|dispatch|fallback|select|build", re.I)
-    registration_noise = re.compile(r"Register|register|OpImplRegister|InitData|PrintOptionMap")
+    registration_noise = re.compile(r"Register|register|OpImplRegister|InitData|PrintOptionMap|"
+                                    r"InitOpsKernelInfo|ops_json_file\.cc|WeightQuantBatchMatmulV2", re.I)
+    node_name = re.compile(r"\b(?:node|op|opname|op_name|node_name|name)\b.{0,32}?\btarget\b", re.I)
+    reuse = re.compile(r"reuse|dispatch\s+online|online\s+compil", re.I)
+    artifact = re.compile(r"oppath|op.path|impl.path|kernel.?name|tiling.?key|block.?dim|binFileName", re.I)
     matched, unreadable = 0, 0
+    best = []
     print("=== TARGET COMPILE BRANCH EVIDENCE ===")
     for path in paths:
-        before = deque(maxlen=2)
-        remaining, last_printed = 0, 0
         try:
             with path.open(encoding="utf-8", errors="replace") as stream:
                 for i, line in enumerate(stream, 1):
-                    # Require the exact op or the actual ONNX target node,
-                    # excluding WeightQuant and process-wide registrations.
-                    target = OP_MATCH.search(line) or re.search(r"\btarget\b", line)
-                    noise = registration_noise.search(line) or re.search(r"WeightQuantBatchMatmulV2", line, re.I)
-                    hit = bool(target and signal.search(line) and not noise)
-                    if hit:
-                        matched += 1
-                        for number, previous in before:
-                            if number > last_printed:
-                                print(f"{path.relative_to(output)}:{number}: {previous[:3000].rstrip()}")
-                                last_printed = number
-                        remaining = 5
-                    if remaining and i > last_printed and not noise:
-                        print(f"{path.relative_to(output)}:{i}: {line[:3000].rstrip()}")
-                        last_printed = i
-                        remaining -= 1
-                    if not noise:
-                        before.append((i, line))
-                    if matched >= 120:
-                        print("Match limit reached; full logs remain unchanged.")
-                        return
+                    node = bool(node_name.search(line))
+                    if (not (node or OP_MATCH.search(line)) or not signal.search(line)
+                            or registration_noise.search(line)):
+                        continue
+                    matched += 1
+                    score = 60*node + 40*bool(reuse.search(line)) + 30*bool(artifact.search(line))
+                    score += 50*("op_compile_stats" in path.name)
+                    # Never stop scanning after early low-value matches. A
+                    # target compilation record may be near the end of plog.
+                    record = (score, -matched, path.name, i, line.rstrip(), node)
+                    if len(best) < 20:
+                        heapq.heappush(best, record)
+                    elif record[:2] > best[0][:2]:
+                        heapq.heapreplace(best, record)
         except OSError as exc:
             unreadable += 1
-            print(f"Cannot read {path}: {exc}")
-    print(f"Target branch matches: {matched}; unreadable logs: {unreadable}")
+            if unreadable <= 3:
+                print(f"Cannot read {path.name}: {str(exc)[:200]}")
+    for _, _, name, number, line, node in sorted(best, reverse=True):
+        short = line if len(line) <= 240 else line[:70]+" ... "+line[-165:]
+        print(f"{name}:{number} [{'node' if node else 'op-type'}] {short}")
+    print(f"Target branch matches: {matched}; shown: {len(best)}; scanned logs: {len(paths)}; unreadable logs: {unreadable}")
+    print("Labels distinguish target-node records from operator-type records. Full lines remain at the printed file/line locations.")
     if not matched:
         print("No target branch evidence found. This does not prove that compilation or binary reuse did not occur.")
 
