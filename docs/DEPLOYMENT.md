@@ -105,7 +105,7 @@ python -m pip install --no-index --find-links /path/to/wheels \
 - hardware.max_blocks：Add 对应 Vector 核数，MatMul 对应 Cube 核数。Host 端还会查询实际资源进行拒绝校验。
 - hardware.peak_flops / bandwidth_bytes_s：必须与对应算子执行单元、FP16、稠密/稀疏口径匹配。示例值仅用于演示 Roofline。
 - hardware.local_memory_bytes：控制器粗筛预算，不等同于 MatMul 各级 L0/L1/UB 总容量。最终由 CANN Tiling API 检验。
-- measurement.selectors：profiling 的精确任务筛选；默认假定基线 Op Type 为 Add 或 MatMulV2，候选为 PpAdd / PpMatmul。实际导出名称不同应先查 CSV 再调整。
+- measurement.selectors：profiling 的精确任务筛选；基线示例使用 Add / BatchMatMulV2，候选使用 PpAdd / PpMatmul。MatMul 基线类型依据 910B / CANN 8.5.0 测试机的实际 CSV；其他环境导出名称不同应先查 CSV 再调整。
 - measurement.timeout_s：每个编译、ATC 或运行进程的超时，默认 900 秒。
 - search.budget：仅搜索候选数量，不含基线和最终复测。失败候选也计数。
 
@@ -139,6 +139,8 @@ python -m paretopilot import-profile --config examples/ascend910b_add.json --rol
 ```
 
 inspect-profile 列出实际 Op Name、Op Type、设备、stream 等及样本数。将准确字段写入 measurement.selectors.baseline/candidate；例如同时设置 Op Type 与 Op Name 来消除歧义。不要通过减少样本或选择另一算子来掩盖拆分/融合问题。必须恰好为 measurement.repeats 条目标任务记录，预热由程序在 profiler.start 之前执行。
+
+已观察到测试机的 256×256 FP16 MatMul 基线导出为 `Op Name=/MatMul`、`OP Type=BatchMatMulV2`。旧配置中的 `MatMulV2` 会导致 `got 0`，因此真实 MatMul 示例已改为 `BatchMatMulV2`，仍要求 20 条记录。更新后可用 import-profile 和新配置检查保留的完整 CSV，无需重新编译或执行 NPU；一键脚本下一次运行会从 examples 复制新配置，已有试验目录中的 manifest/config 保留原值。
 
 可选 measurement.traffic_column 必须为同一目标任务每次调用的**总字节数**，不能直接使用 GB/s 带宽列；未配置时 Roofline 用 shape 最低流量并标明理论口径。
 

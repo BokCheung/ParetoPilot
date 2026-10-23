@@ -60,7 +60,7 @@
     "timeout_s": 900,
     "selectors": {
       "baseline": {
-        "Op Type": "MatMulV2"
+        "Op Type": "BatchMatMulV2"
       },
       "candidate": {
         "Op Type": "PpMatmul"

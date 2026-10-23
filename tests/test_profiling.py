@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from paretopilot.cli import main
+from paretopilot.config import load_config
 from paretopilot.profiling import read_profile
 from paretopilot.util import TuningError
 
@@ -35,6 +36,20 @@ class ProfilingTests(unittest.TestCase):
         self.assertEqual(result["samples_us"], [8.5, 8.48])
         self.assertAlmostEqual(result["duration_us"], 8.49)
         self.assertIsNone(result["measured_bytes"])
+
+    def test_910b_matmul_config_matches_reported_profile(self):
+        config = load_config(Path(__file__).resolve().parents[1]/"examples/ascend910b_matmul.json")
+        fixture = FIXTURE.with_name("cann850_matmul_op_summary.csv")
+        measurement = config["measurement"]
+        selector = measurement["selectors"]["baseline"]
+        # The supplied excerpt has two rows; the real capture must still contain 20.
+        result = read_profile([fixture], selector, 2)
+        self.assertEqual(result["samples_us"], [7.52, 7.62])
+        self.assertAlmostEqual(result["duration_us"], 7.57)
+        with self.assertRaisesRegex(TuningError, "Expected exactly 20 target task samples; got 2"):
+            read_profile([fixture], selector, measurement["repeats"])
+        with self.assertRaisesRegex(TuningError, "got 0"):
+            read_profile([fixture], {"Op Type": "MatMulV2"}, 2)
 
     def test_old_and_new_headers_and_selectors_are_interoperable(self):
         old_names = {"OP Type": "Op Type", "Stream ID": "Stream Id", "Model ID": "Model Id", "Device_id": "Device Id"}

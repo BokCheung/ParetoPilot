@@ -4,6 +4,8 @@
 
 `python -m unittest discover -s tests -v`：48 项全部通过，无跳过。
 
+2026-10-23 增量验证：MatMul 实机 CSV 显示 `/MatMul` 的类型为 `BatchMatMulV2`，已修正真实基线示例筛选条件。新增回归测试后，`python -m unittest discover -s tests -p test_profiling.py -v` 的 8 项全部通过；Ascend MatMul 配置 validate 通过。回放所提供的两条记录为 7.520/7.620 μs，同时确认旧类型得到 0 条、两条记录不能满足正式测试的 20 条要求。本次未在本机重跑完整硬件流程。
+
 - 核心：配置约束、Roofline 公式和流量口径、Dummy 不调整参数域、插件域验证。
 - 搜索：固定 seed 可复现、参数去重和预算、失败候选、噪声/小收益回退、已有输出保护。
 - 采样：精确筛选、中位数、重复导出、混合节点、NaN 拒绝。
