@@ -73,3 +73,5 @@ python3 scripts/test_910b.py \
 - `runtime.log`、`runtime.json`、`profiler_export.log`、CSV：执行、正确性和采样结果。
 
 本地测试覆盖源码完整性、补丁范围、构建调用、测量流程与判定；本地没有 CANN/NPU，不能替代 910B2 真机编译和精度验收。
+
+若要直接研究内置 `BatchMatMulV2` 的实现与可调入口，使用 [安装包实现定位脚本](INSPECT_BATCHMATMULV2.md)，先取得注册、实际编译入口和依赖证据。
