@@ -119,6 +119,33 @@ class InspectCannOperatorTests(unittest.TestCase):
         self.assertIn("opFile", out.getvalue())
         self.assertIn(path, out.getvalue())
 
+    def test_branch_evidence_skips_quantized_registration_noise_and_scans_beyond_old_excerpt(self):
+        logs = self.root/"logs/debug/plog"
+        logs.mkdir(parents=True)
+        (logs/"plog.log").write_text(
+            "WeightQuantBatchMatmulV2 register kernel tiling\n"*1500+
+            "BatchMatMulV2 RegisterOperatorCreator kernel\n"+
+            "context before selection\n"+
+            "node[target] op[BatchMatMulV2] reuse binary kernel k0\n"+
+            "op path /opp/impl/ops_legacy/dynamic/batch_matmul_v2.py\n")
+        # Old general excerpts can contain no useful target evidence.
+        (self.root/"log-matches.txt").write_text("irrelevant excerpt")
+        with redirect_stdout(io.StringIO()) as out:
+            code = script.main(["--summarize", str(self.root), "--branches-only"])
+        text = out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("reuse binary kernel k0", text)
+        self.assertIn("context before selection", text)
+        self.assertIn("/opp/impl/ops_legacy/dynamic/batch_matmul_v2.py", text)
+        self.assertNotIn("WeightQuantBatchMatmulV2", text)
+        self.assertNotIn("RegisterOperatorCreator", text)
+        self.assertIn("Target branch matches: 2", text)
+
+    def test_exact_operator_match_excludes_weight_quant_but_keeps_kernel_suffixes(self):
+        self.assertIsNone(script.OP_MATCH.search("WeightQuantBatchMatmulV2"))
+        self.assertTrue(script.OP_MATCH.search("BatchMatMulV2_123"))
+        self.assertTrue(script.OP_MATCH.search("/dynamic/batch_matmul_v2.py"))
+
     def test_replay_failure_still_writes_evidence_and_does_not_claim_trace(self):
         baseline = self.baseline()
         cann = self.root/"cann"

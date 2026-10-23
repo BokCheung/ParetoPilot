@@ -19,7 +19,8 @@ from paretopilot.util import TuningError, read_json, run_command, write_json
 from scripts.test_910b import resolve_cann, source_environment, positive
 
 OPERATOR = "BatchMatMulV2"
-MATCH = re.compile(r"BatchMatMulV2|batch_?mat_?mul_?v2|oppath|op_compile_stats|"
+OP_MATCH = re.compile(r"(?<![A-Za-z])(?:BatchMatMulV2|batch_?mat_?mul_?v2)(?![A-Za-z])", re.I)
+MATCH = re.compile(r"(?<![A-Za-z])(?:BatchMatMulV2|batch_?mat_?mul_?v2)(?![A-Za-z])|oppath|op_compile_stats|"
                    r"kernel.?name|tiling.?key|opFile|opInterface|reuse (?:binary|disk|task)|dispatch online", re.I)
 
 
@@ -203,9 +204,58 @@ def collect_evidence(output, opened, warnings):
                             return
 
 
-def summarize(output):
+def branch_evidence(output):
+    """Search full existing logs; do not reuse the truncated general excerpt."""
+    from collections import deque
+    output = Path(output).expanduser().resolve()
+    paths = sorted(p for p in output.rglob("*.log") if p.name not in
+                   {"trace-files.log", "cann-env.log", "strace-probe.log"})
+    paths.sort(key=lambda p: ("op_compile_stats" not in p.name, "plog" not in p.name, str(p)))
+    signal = re.compile(r"compil|reuse|binary|tiling|oppath|op.path|kernel|dispatch|fallback|select|build", re.I)
+    registration_noise = re.compile(r"Register|register|OpImplRegister|InitData|PrintOptionMap")
+    matched, unreadable = 0, 0
+    print("=== TARGET COMPILE BRANCH EVIDENCE ===")
+    for path in paths:
+        before = deque(maxlen=2)
+        remaining, last_printed = 0, 0
+        try:
+            with path.open(encoding="utf-8", errors="replace") as stream:
+                for i, line in enumerate(stream, 1):
+                    # Require the exact op or the actual ONNX target node,
+                    # excluding WeightQuant and process-wide registrations.
+                    target = OP_MATCH.search(line) or re.search(r"\btarget\b", line)
+                    noise = registration_noise.search(line) or re.search(r"WeightQuantBatchMatmulV2", line, re.I)
+                    hit = bool(target and signal.search(line) and not noise)
+                    if hit:
+                        matched += 1
+                        for number, previous in before:
+                            if number > last_printed:
+                                print(f"{path.relative_to(output)}:{number}: {previous[:3000].rstrip()}")
+                                last_printed = number
+                        remaining = 5
+                    if remaining and i > last_printed and not noise:
+                        print(f"{path.relative_to(output)}:{i}: {line[:3000].rstrip()}")
+                        last_printed = i
+                        remaining -= 1
+                    if not noise:
+                        before.append((i, line))
+                    if matched >= 120:
+                        print("Match limit reached; full logs remain unchanged.")
+                        return
+        except OSError as exc:
+            unreadable += 1
+            print(f"Cannot read {path}: {exc}")
+    print(f"Target branch matches: {matched}; unreadable logs: {unreadable}")
+    if not matched:
+        print("No target branch evidence found. This does not prove that compilation or binary reuse did not occur.")
+
+
+def summarize(output, branches_only=False):
     """Read independent evidence files without one unreadable log hiding the rest."""
     output = Path(output).expanduser().resolve()
+    if branches_only:
+        branch_evidence(output)
+        return 0
     for name in ("report.json", "atc.log", "registration-and-sources.json"):
         print(f"\n=== {name} ===")
         try:
@@ -232,13 +282,16 @@ def main(argv=None):
     parser.add_argument("--cann-env", type=Path)
     parser.add_argument("--baseline-dir", type=Path, help="Existing stock baseline/ with atc.command.json")
     parser.add_argument("--summarize", type=Path, metavar="DIAGNOSTIC_DIR", help="Read an existing report without rerunning ATC")
+    parser.add_argument("--branches-only", action="store_true", help="With --summarize, search full logs for target compile/reuse/tiling evidence")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--scan-only", action="store_true", help="Inspect installed files without replaying ATC")
     parser.add_argument("--no-strace", action="store_true")
     parser.add_argument("--timeout", type=positive, default=3600)
     args = parser.parse_args(argv)
     if args.summarize:
-        return summarize(args.summarize)
+        return summarize(args.summarize, args.branches_only)
+    if args.branches_only:
+        parser.error("--branches-only requires --summarize")
     if not args.cann_path or not args.baseline_dir:
         parser.error("--cann-path and --baseline-dir are required unless --summarize is used")
     if not sys.platform.startswith("linux"):

@@ -28,8 +28,17 @@ python3 scripts/inspect_cann_operator.py \
 也可以一次提取报告、ATC 最后 120 行及 910B/V2 相关注册和 Python 入口信息；某个文件不可读时会提示并继续读取其他文件：
 
 ```bash
-python3 scripts/inspect_cann_operator.py --summarize runs/inspect-bmmv2-实际目录
+python3 scripts/inspect_cann_operator.py --summarize runs/inspect-bmmv2-05pygq57
 ```
+
+若一般日志摘录被初始化注册信息占满，可以直接搜索已有完整日志中的目标编译分支，不必重跑 ATC：
+
+```bash
+python3 scripts/inspect_cann_operator.py \
+  --summarize runs/inspect-bmmv2-05pygq57 --branches-only
+```
+
+该模式优先检查编译统计与 plog，按完整算子名/目标节点筛选，排除 `WeightQuantBatchMatmulV2` 和注册噪声，保留匹配前后上下文。未找到记录只表示当前日志没有足够证据，不能据此判断没有编译或二进制复用。
 
 如果之前已经通过 sudo 运行，保留旧目录作为诊断证据，使用普通用户重新运行以生成新目录。不要通过 sudo pip 向系统 Python 重新安装依赖。`No module named 'numpy'` 表示 ATC 初始化所使用的 Python 搜索路径缺依赖，并不能证明 V2 内核或其源码有问题。
 
