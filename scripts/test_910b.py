@@ -18,6 +18,8 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from paretopilot.config import load_config
+from paretopilot.official import enabled as official_enabled, DEFAULT_PARAMS, COMMIT
+from paretopilot.search import confirmation_roles
 from paretopilot.util import TuningError, read_json, write_json
 
 
@@ -41,6 +43,7 @@ def parser():
     p.add_argument("--cann-env", type=Path, help="Explicit set_env.sh when it is outside the CANN root")
     p.add_argument("--soc", required=True, help="Exact target SoC, e.g. Ascend910B1; check npu-smi")
     p.add_argument("--device", type=nonnegative, default=0)
+    p.add_argument("--operator", choices=("all", "matmul", "add"), default="all", help="Select hardware acceptance stages")
     p.add_argument("--scope", choices=("smoke", "full"), default="full", help="Both run preflight, unit tests, simulation, baselines and smoke; full also searches both operators")
     p.add_argument("--deps", choices=("install", "offline", "check"), default="install", help="install/offline use an isolated venv; check uses this interpreter without installing dependencies")
     p.add_argument("--wheelhouse", type=Path, help="Local wheels for --deps offline")
@@ -80,6 +83,7 @@ def source_environment(root, script, log):
             key, value = item.split(b"=", 1)
             env[os.fsdecode(key)] = os.fsdecode(value)
     env["ASCEND_TOOLKIT_HOME"] = str(root)
+    env["ASCEND_HOME_PATH"] = str(root)
     env["PATH"] = str(root/"python/site-packages/bin") + os.pathsep + env.get("PATH", "")
     env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
     env["PYTHONUNBUFFERED"], env["PYTHONIOENCODING"] = "1", "utf-8"
@@ -192,7 +196,7 @@ def prepare_python(session, args):
 
 def prepare_configs(args, output):
     configs = {}
-    for kind in ("add", "matmul"):
+    for kind in operator_kinds(args):
         config = load_config(args.config_dir/f"ascend910b_{kind}.json")
         if config["backend"] != "ascend" or config["operator"]["kind"] != kind:
             raise TuningError(f"{kind} input config must describe the matching Ascend operator")
@@ -201,13 +205,20 @@ def prepare_configs(args, output):
         config["measurement"]["timeout_s"] = args.timeout
         smoke = deepcopy(config)
         smoke["space"] = {name: [values[0]] for name, values in config["space"].items()}
-        smoke["space"]["block_dim"] = [1]
+        if official_enabled(config):
+            smoke["space"] = {k: [v] for k, v in DEFAULT_PARAMS.items()}
+        else:
+            smoke["space"]["block_dim"] = [1]
         for suffix, value in ((kind, config), (kind+"-smoke", smoke)):
             path = output/"config"/(suffix+".json")
             write_json(path, value)
             load_config(path)
             configs[suffix] = path
     return configs
+
+
+def operator_kinds(args):
+    return ("add", "matmul") if args.operator == "all" else (args.operator,)
 
 
 def verify_result(directory, smoke):
@@ -219,36 +230,45 @@ def verify_result(directory, smoke):
     history = result.get("history", [])
     confirmation = result.get("confirmation", {}).get("trials", [])
     config = read_json(directory/"manifest.json")["config"]
-    expected = 2*config["measurement"]["confirmation_rounds"]
-    roles = [role for i in range(expected//2) for role in (("baseline", "candidate") if i % 2 == 0 else ("candidate", "baseline"))]
+    rounds = config["measurement"]["confirmation_rounds"]
+    roles = [role for i in range(rounds) for role in confirmation_roles(config, i)]
+    expected = len(roles)
     if result.get("mode") != "ascend" or not valid(result.get("baseline", {})):
         raise TuningError(f"{directory.name}: invalid real baseline")
+    if official_enabled(config) and not valid(result.get("source_baseline", {})):
+        raise TuningError(f"{directory.name}: invalid official source baseline")
     good = [t for t in history if valid(t)]
-    if not good or (smoke and (len(history) != 1 or len(good) != 1 or expected != 4)):
+    if not good or (smoke and (len(history) != 1 or len(good) != 1 or rounds != 2)):
         raise TuningError(f"{directory.name}: candidate execution/correctness failed")
     if len(confirmation) != expected or not all(valid(t) for t in confirmation) or [t.get("role") for t in confirmation] != roles:
         raise TuningError(f"{directory.name}: incomplete or failed confirmation; inspect confirmation/")
+    if official_enabled(config):
+        source_trials = [result["source_baseline"], *good, *(t for t in confirmation if t["role"] != "baseline")]
+        if any(t.get("selection", {}).get("commit") != COMMIT or not t.get("selection", {}).get("effective_tiling") for t in source_trials):
+            raise TuningError(f"{directory.name}: official source identity/effective tiling evidence missing")
     return {"status": "passed", "successful_candidates": len(good), "failed_candidates": len(history)-len(good),
             "selected": result["selected"], "selected_params": result["selected_params"],
-            "reason": result["confirmation"]["reason"], "report": str(directory/"report.html")}
+            "reason": result["confirmation"]["reason"], "report": str(directory/"report.html"),
+            "task_metrics": {k: result["confirmation"][k] for k in ("baseline_us", "source_baseline_us", "candidate_us", "speedup", "source_speedup", "tuning_accepted") if k in result["confirmation"]}}
 
 
 def execute_suite(session, args, python, configs):
     cli = [python, "-m", "paretopilot"]
-    session.run("doctor", cli+["doctor", "--config", str(configs["add"]), "--output", str(session.root/"environment.json")])
+    kinds = operator_kinds(args)
+    session.run("doctor", cli+["doctor", "--config", str(configs[kinds[-1]]), "--output", str(session.root/"environment.json")])
     # Required imports prevent optional dependency tests from silently skipping.
     session.run("python-dependencies", [python, "-c", "import acl,numpy,torch,onnx; print('PyACL:',acl.__file__); print('numpy/torch/onnx:',numpy.__version__,torch.__version__,onnx.__version__)"])
     session.run("python-packages", [python, "-c", "from importlib.metadata import distributions; print('\\n'.join(sorted(d.metadata['Name']+'=='+d.version for d in distributions() if d.metadata['Name'])))"])
-    for kind in ("add", "matmul"):
+    for kind in kinds:
         session.run("validate-"+kind, cli+["validate", "--config", str(configs[kind])])
     session.run("unit-tests", [python, "-m", "unittest", "discover", "-s", "tests", "-v"])
-    for kind in ("add", "matmul"):
+    for kind in kinds:
         session.run("simulation-"+kind, cli+["run", "--config", str(ROOT/f"examples/simulation_{kind}.json"), "--output", str(session.root/("simulation-"+kind))])
-    for kind in ("add", "matmul"):
+    for kind in kinds:
         session.run(kind+"-baseline", cli+["baseline", "--config", str(configs[kind]), "--output", str(session.root/(kind+"-baseline"))])
     phases = ("smoke", "full") if args.scope == "full" else ("smoke",)
     for phase in phases:
-        for kind in ("add", "matmul"):
+        for kind in kinds:
             name = kind+"-"+phase
             directory = session.root/name
             command = cli+["run", "--config", str(configs[name if phase == "smoke" else kind]), "--output", str(directory)]
@@ -299,7 +319,8 @@ def main(argv=None):
         write_json(root/"cann.json", {"root": str(cann), "env_script": str(script), "version_records": versions})
         session.env = source_environment(cann, script, root/"cann-env.log")
         configs = prepare_configs(args, root)
-        commands = {read_json(configs[kind])["ascend"].get(tool, tool) for kind in ("add", "matmul") for tool in ("atc", "msopgen", "msprof")}
+        commands = {read_json(configs[kind])["ascend"].get(tool, tool) for kind in operator_kinds(args) for tool in ("atc", "msprof")}
+        commands.update(read_json(configs[kind])["ascend"].get("msopgen", "msopgen") for kind in operator_kinds(args) if not official_enabled(read_json(configs[kind])))
         for name in sorted(commands | {"cmake", "g++", "make", "npu-smi"}):
             if not shutil.which(name, path=session.env.get("PATH")):
                 raise TuningError(f"Required executable missing: {name}; check CANN Toolkit/ops and build tools")

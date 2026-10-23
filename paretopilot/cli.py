@@ -8,6 +8,7 @@ from .doctor import inspect_environment
 from .package import create_package
 from .profiling import inspect_profiles, read_profile
 from .roofline import analyze
+from .official import enabled as official_enabled, DEFAULT_PARAMS
 from .search import run
 from .space import enumerate_space
 from .util import TuningError, write_json
@@ -29,7 +30,7 @@ def parser():
     cmd.add_argument("csv", nargs="+")
     cmd = sub.add_parser("import-profile", help="Validate and analyze an existing target-op CSV")
     cmd.add_argument("--config", required=True)
-    cmd.add_argument("--role", choices=("baseline", "candidate"), required=True)
+    cmd.add_argument("--role", choices=("baseline", "source_baseline", "candidate"), required=True)
     cmd.add_argument("csv", nargs="+")
     cmd = sub.add_parser("package", help="Create a source ZIP to transfer to the test machine")
     cmd.add_argument("--output", required=True)
@@ -66,6 +67,8 @@ def main(argv=None):
                 if args.smoke:
                     c["search"].update(population=2, generations=1, budget=1)
                     c["measurement"]["confirmation_rounds"] = 2
+                    if official_enabled(c):
+                        c["space"] = {k: [v] for k, v in DEFAULT_PARAMS.items()}
                 if c["backend"] == "ascend" and not sys.platform.startswith("linux"):
                     raise TuningError("Ascend backend requires the Linux 910B/CANN test machine; use simulation here")
                 def progress(t, count):

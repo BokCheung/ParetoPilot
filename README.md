@@ -2,7 +2,9 @@
 
 固定 shape/dtype 的昇腾算子参数搜索工具。目标测试环境为 **Linux、Ascend 910B、CANN 8.5.0**，无需 Agent 接口、API Key 或联网推理。
 
-当前实现：PyTorch 参考输出与 ONNX 导出 → ATC 基线 OM → Roofline → Dummy Agent 参数域 → 遗传搜索 → 内置 Ascend C 候选编译、独立注册、ATC → PyACL 正确性与 profiling → 交错复测 → 报告。
+当前实现：PyTorch 参考输出与 ONNX 导出 → ATC 内置基线 → CANN 8.5.0 官方 MatMulV3 源码默认配置 → Roofline → Dummy Agent 参数域 → 遗传搜索 → 同源候选编译、ATC → PyACL 正确性与 profiling → 三路交错复测 → 报告。Add 保留原有内置 Ascend C 模板。
+
+官方源码来源、参数语义和 910B2 命令见 [官方 MatMul 调优](docs/OFFICIAL_MATMUL.md)。
 
 ## 支持范围
 
@@ -10,13 +12,13 @@
 | --- | --- |
 | MatMul | 二维 FP16，M/N/K 为 16 的倍数，ND 输入输出，无转置、bias、batch |
 | Elementwise | 两输入同 shape 的 FP16 Add，支持任意正整数 numel 与尾块 |
-| 参数 | MatMul: tile_m/n/k、block_dim；buffers 固定 1，由 CANN 管理内部缓冲 |
+| 参数 | 官方 MatMul: core_limit、tiling_policy；分块和缓冲由官方 tiler 计算 |
 | 参数 | Add: tile_elems、buffers=1/2、block_dim |
 | Agent | 默认 DummyAgent，原样返回配置参数域；每代保存 Roofline/历史输入与建议输出 |
-| 指标 | 两侧 OM 目标任务 Task Duration(us) 中位数 |
+| 指标 | 各路 OM 目标任务 Task Duration(us) 中位数 |
 | 报告 | HTML、Markdown、Roofline SVG、CSV、JSON、阶段日志、参数/源码/OM 哈希 |
 
-这里提供实际 Host/Device 源码和执行链路，不需要自行准备算子工程。msopgen 只生成与本机 CANN 配套的构建框架，ParetoPilot 注入内置实现。**本机没有 NPU/CANN，尚未完成真机编译与性能验收。**
+官方 MatMul 源码及构建依赖已随仓库打包，测试机通过 GitHub 拉取即可；Add 使用 msopgen 构建框架。**本地没有 NPU/CANN，新官方源码路径仍需在 910B2 上完成编译、精度和性能验收。**
 
 ## 本机运行模拟闭环
 
@@ -36,12 +38,12 @@ python -m paretopilot run --config examples/simulation_add.json --output runs/si
 
 ```bash
 python3 scripts/test_910b.py \
-  --cann-path /usr/local/Ascend/cann \
-  --soc Ascend910B1 \
-  --device 0
+  --cann-path /usr/local/Ascend/cann-8.5.0 \
+  --soc Ascend910B2 \
+  --device 0 --deps check --scope full --timeout 3600
 ```
 
-按实际安装路径和芯片型号调整参数。脚本自动加载 CANN 环境、在 `.venv-910b` 安装依赖，然后执行环境检查、单元测试、两套模拟流程、真实基线、smoke 和完整搜索。只做首次试跑可添加 `--scope smoke`；复用已有 Python 依赖可添加 `--deps check`；离线安装使用 `--deps offline --wheelhouse /path/to/wheels`。
+按实际安装路径和芯片型号调整参数。上面的命令使用已装好的依赖；脚本自动加载 CANN 环境，然后执行环境检查、单元测试、两套模拟流程、真实基线、smoke 和完整搜索。只做首次试跑可添加 `--scope smoke`；复用已有 Python 依赖可添加 `--deps check`；离线安装使用 `--deps offline --wheelhouse /path/to/wheels`。
 
 结果写入独立的 `runs/910b-*` 目录，包含 `test-summary.json`、阶段日志和 `diagnostics.zip`。任何阶段或最终复测失败都会停止后续阶段；收益不足而保留基线可正常通过。完整选项见 [部署步骤](docs/DEPLOYMENT.md)。
 
@@ -59,7 +61,7 @@ python -m paretopilot run --config examples/ascend910b_add.json --output runs/ad
 python -m paretopilot run --config examples/ascend910b_matmul.json --output runs/matmul-smoke --smoke
 ```
 
-示例 SoC 为 `Ascend910B1`；必须按测试机实际型号调整。Roofline 的算力、带宽只是示例假设，需要替换成该芯片、dtype、稠密口径下的数值。配置通过不代表硬件参数已验证。
+官方 MatMul 示例 SoC 为 `Ascend910B2`；一键脚本统一用 `--soc` 覆盖所选算子的配置。Roofline 的算力、带宽只是示例假设，需要替换成该芯片、dtype、稠密口径下的数值。配置通过不代表硬件参数已验证。
 
 ## 自定义基线与未来 Agent
 

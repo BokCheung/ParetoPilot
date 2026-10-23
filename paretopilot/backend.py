@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 from .build import build_candidate, op_names
+from .official import enabled as official_enabled, read_effective_tiling
 from .profiling import read_profile
 from .roofline import analyze
 from .util import TuningError, digest, file_hash, read_json, run_command, write_json
@@ -35,7 +36,7 @@ class AscendBackend:
     def evaluate(self, params, directory, role):
         directory = Path(directory)
         env, build = environment(), None
-        if role == "candidate":
+        if role in ("candidate", "source_baseline"):
             build = build_candidate(self.c, params, directory, env)
             env = environment(build["opp_path"])
             self.candidate_graph(directory/"model.onnx")
@@ -49,10 +50,12 @@ class AscendBackend:
         self.command(atc, directory, "atc", env)
         om = directory/"model.om"
         om_hash = file_hash(om)
-        if role == "candidate":
+        if role in ("candidate", "source_baseline"):
             marker = "PARETOPILOT_PARAMS="+digest(params)
             if marker not in (directory/"atc.log").read_text(encoding="utf-8", errors="replace"):
                 raise TuningError("ATC log does not show candidate Host tiling parameter signature")
+            if official_enabled(self.c):
+                build["effective_tiling"] = read_effective_tiling(directory/"atc.log", params)
             write_json(directory/"selection.json", {**build, "om_sha256": om_hash, "atc_log_sha256": file_hash(directory/"atc.log"), "marker": marker})
         write_json(directory/"runtime_request.json", {"config": self.c, "om": str(om), "case": str(self.case), "directory": str(directory)})
         self.command([sys.executable, "-m", "paretopilot.worker", "run", str(directory/"runtime_request.json")], directory, "runtime", env)

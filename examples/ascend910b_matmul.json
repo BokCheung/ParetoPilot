@@ -14,33 +14,22 @@
     "peak_flops": 200000000000000,
     "bandwidth_bytes_s": 1000000000000,
     "local_memory_bytes": 196608,
-    "max_blocks": 20,
+    "max_blocks": 24,
     "alignment": 16,
     "note": "Illustrative Roofline assumptions, NOT verified 910B specifications. Set measured or documented values for your exact chip and dtype."
   },
   "space": {
-    "tile_m": [
-      32,
-      64,
-      128
-    ],
-    "tile_n": [
-      32,
-      64,
-      128
-    ],
-    "tile_k": [
-      32,
-      64
-    ],
-    "buffers": [
-      1
-    ],
-    "block_dim": [
-      4,
+    "core_limit": [
+      0,
       8,
+      12,
       16,
-      20
+      20,
+      24
+    ],
+    "tiling_policy": [
+      0,
+      1
     ]
   },
   "search": {
@@ -57,13 +46,16 @@
     "confirmation_rounds": 3,
     "rtol": 0.01,
     "atol": 0.01,
-    "timeout_s": 900,
+    "timeout_s": 3600,
     "selectors": {
       "baseline": {
         "Op Type": "BatchMatMulV2"
       },
       "candidate": {
-        "Op Type": "PpMatmul"
+        "Op Type": "MatMulV3"
+      },
+      "source_baseline": {
+        "Op Type": "MatMulV3"
       }
     }
   },
@@ -71,9 +63,13 @@
     "kind": "dummy"
   },
   "ascend": {
-    "soc_version": "Ascend910B1",
+    "soc_version": "Ascend910B2",
     "cann_version": "8.5.0",
-    "source_tag": "paretopilot-bundled-v1.1.0",
+    "source_tag": "cann-ops-nn-8.5.0-9f8a66e795ef1842c2118cf5bbadfe3624bdd1ef",
     "device": 0
+  },
+  "implementation": {
+    "kind": "cann_matmul_v3",
+    "build_jobs": 4
   }
 }

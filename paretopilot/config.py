@@ -1,6 +1,7 @@
 import math
 from pathlib import Path
 from .util import TuningError, number, read_json
+from .official import KIND, enabled as official_enabled
 
 
 def load_config(path):
@@ -17,6 +18,16 @@ def load_config(path):
         op = c["operator"]
         if op["kind"] not in ("matmul", "add") or op["dtype"] not in ("float16", "float32"):
             raise TuningError("V1 supports matmul/add with float16/float32")
+        implementation = c.get("implementation", {"kind": "bundled"})
+        if not isinstance(implementation, dict) or implementation.get("kind") not in ("bundled", KIND):
+            raise TuningError("implementation.kind must be bundled or cann_matmul_v3")
+        official = official_enabled(c)
+        if official and (c["backend"] != "ascend" or op["kind"] != "matmul" or op["dtype"] != "float16"):
+            raise TuningError("Official MatMul currently requires Ascend FP16 MatMul")
+        if official:
+            number(implementation.get("build_jobs", 4), "build_jobs", 1, True)
+            if any(op[k] % 16 for k in ("m", "n", "k")):
+                raise TuningError("Official MatMul acceptance currently requires M/N/K multiples of 16")
         for key in (("m", "n", "k") if op["kind"] == "matmul" else ("numel",)):
             number(op[key], key, 1, True)
         for key in ("peak_flops", "bandwidth_bytes_s", "local_memory_bytes", "max_blocks", "alignment"):
@@ -25,12 +36,17 @@ def load_config(path):
             if not key.isidentifier() or not isinstance(values, list) or not values:
                 raise TuningError(f"Invalid parameter domain: {key}")
             for value in values:
-                number(value, key, 1, True)
+                number(value, key, 0 if official else 1, True)
             if len(set(values)) != len(values):
                 raise TuningError(f"Duplicate values: {key}")
         required = {"tile_m", "tile_n", "tile_k", "buffers", "block_dim"} if op["kind"] == "matmul" else {"tile_elems", "buffers", "block_dim"}
+        if official:
+            required = {"core_limit", "tiling_policy"}
         if set(c["space"]) != required:
             raise TuningError(f"Template requires parameters {sorted(required)}")
+        if official and (any(v > min(24, c["hardware"]["max_blocks"]) for v in c["space"]["core_limit"])
+                         or any(v not in (0, 1) for v in c["space"]["tiling_policy"])):
+            raise TuningError("Official MatMul: core_limit must fit the configured AI Core limit (0=auto); tiling_policy must be 0 or 1")
         if math.prod(map(len, c["space"].values())) > 200000:
             raise TuningError("Limit discrete template space to 200000 combinations")
         s = c["search"]
@@ -46,7 +62,7 @@ def load_config(path):
         for key in ("rtol", "atol"):
             number(m[key], key)
         number(m["timeout_s"], "timeout_s", 1)
-        for role in ("baseline", "candidate"):
+        for role in (("baseline", "source_baseline", "candidate") if official else ("baseline", "candidate")):
             selector = m["selectors"][role]
             if not isinstance(selector, dict) or not selector or not all(isinstance(k, str) and isinstance(v, str) and v for k, v in selector.items()):
                 raise TuningError("Profiling selectors must contain exact nonempty column/value pairs")
@@ -85,7 +101,7 @@ def load_config(path):
                 raise TuningError("MatMul dimensions must fit int32")
             if op["dtype"] != "float16":
                 raise TuningError("Bundled 910B kernels currently support float16")
-            if op["kind"] == "matmul" and (any(op[k] % 16 for k in ("m", "n", "k")) or c["space"]["buffers"] != [1]):
+            if op["kind"] == "matmul" and not official and (any(op[k] % 16 for k in ("m", "n", "k")) or c["space"]["buffers"] != [1]):
                 raise TuningError("Bundled MatMul requires M/N/K multiples of 16 and buffers=[1] (CANN owns internal buffers)")
             if not a["soc_version"].startswith("Ascend910B") or not a["cann_version"].startswith("8.5.0"):
                 raise TuningError("Bundled kernels target Ascend910B and CANN 8.5.0")

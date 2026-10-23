@@ -2,9 +2,12 @@
 from pathlib import Path
 import shutil
 from .util import TuningError, digest, read_json, run_command, tree_hash, write_json
+from .official import enabled as official_enabled, build_official
 
 
 def op_names(config):
+    if official_enabled(config):
+        return "ParetoPilotOfficialMatMul", "mat_mul_v3"
     return ("PpMatmul", "pp_matmul") if config["operator"]["kind"] == "matmul" else ("PpAdd", "pp_add")
 
 
@@ -24,6 +27,8 @@ def find_onnx_parser(project):
 
 def build_candidate(config, params, directory, env):
     directory = Path(directory)
+    if official_enabled(config):
+        return build_official(config, params, directory, env)
     op, stem = op_names(config)
     timeout = config["measurement"]["timeout_s"]
     parameter_hash = digest(params)

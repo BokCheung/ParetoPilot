@@ -1,3 +1,6 @@
+from .official import enabled as official_enabled
+
+
 def analyze(config, duration_us=None, measured_bytes=None):
     op, hw = config["operator"], config["hardware"]
     size = 2 if op["dtype"] == "float16" else 4
@@ -12,6 +15,8 @@ def analyze(config, duration_us=None, measured_bytes=None):
     compute, memory = flops/hw["peak_flops"], traffic/hw["bandwidth_bytes_s"]
     if op["kind"] == "matmul" and memory > compute:
         priority = ["tile_k", "buffers", "tile_m"]
+    if official_enabled(config):
+        priority = ["core_limit", "tiling_policy"] if compute >= memory else ["tiling_policy", "core_limit"]
     return {"flops": flops, "minimum_bytes": minimum, "measured_bytes": measured_bytes,
             "traffic_basis": "shape_minimum" if measured_bytes is None else "profiling",
             "arithmetic_intensity": flops/traffic, "ideal_lower_bound_us": max(compute, memory)*1e6,

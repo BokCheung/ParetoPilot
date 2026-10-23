@@ -2,6 +2,8 @@
 
 默认 agent.kind="dummy"。每代搜索先构造 context，包含 schema_version、generation、operator、hardware、original_space、baseline、best、roofline 和完整 history。
 
+官方 MatMul 模式下，context.baseline 指向 source_baseline（官方源码默认参数），context.stock_baseline 保留 CANN 内置对照；Roofline 来自同源基线或最佳候选。参数名为 core_limit、tiling_policy，默认值 0 是有效参数。
+
 DummyAgent 原样复制 original_space，返回空 priority；不解释 Roofline，不调用网络，也不会收缩或扩展参数域。Roofline 的瓶颈假设和 suggested_priority 仍保存并传入，供未来 Agent 使用。
 
 ```json

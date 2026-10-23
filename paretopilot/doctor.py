@@ -5,6 +5,8 @@ import platform
 import shutil
 import subprocess
 import sys
+from .official import enabled as official_enabled, verify_bundle, legacy_library
+from .util import TuningError
 
 
 def inspect_environment(config):
@@ -16,7 +18,19 @@ def inspect_environment(config):
         return {"ready": all(x["passed"] for x in checks), "backend": "simulation", "checks": checks}
     add("platform", sys.platform.startswith("linux"), platform.platform())
     a = config["ascend"]
-    for command in (a.get("atc", "atc"), a.get("msopgen", "msopgen"), a.get("msprof", "msprof"), "bash", "cmake", "g++"):
+    commands = [a.get("atc", "atc"), a.get("msprof", "msprof"), "bash", "cmake", "g++", "make"]
+    if not official_enabled(config):
+        commands.append(a.get("msopgen", "msopgen"))
+    else:
+        try:
+            add("official_source", True, verify_bundle()["commit"])
+        except (TuningError, OSError) as exc:
+            add("official_source", False, str(exc))
+        try:
+            add("official_legacy_library", True, str(legacy_library(os.environ)[0]))
+        except (TuningError, OSError) as exc:
+            add("official_legacy_library", False, str(exc))
+    for command in commands:
         path = shutil.which(command)
         add(command, path is not None, path or "Not on PATH; source CANN set_env.sh and install development tools")
     for module in ("numpy", "torch", "onnx", "acl"):

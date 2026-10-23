@@ -2,12 +2,15 @@
 
 旧版外部 stage 请求/响应适配器占位协议已由内置后端替换。用户不需要实现 adapter 命令。入口为 backend.AscendBackend，重依赖和设备状态隔离在 worker 子进程。
 
+官方 MatMul 的默认配置、参数、来源和三路对照见 [官方源码调优](OFFICIAL_MATMUL.md)。Device 源码保持上游原样，不适用下文旧模板的固定 key=1 描述。
+
 ## 模块与阶段
 
 | 阶段 | 实现 | 产物 |
 | --- | --- | --- |
 | 导出参考 | worker.export_case | 输入 .npy、reference.npy、baseline.onnx、case.json |
-| 工程/编译 | build.build_candidate + kernels/ | msopgen 工程、参数头、ONNX parser、.run、独立 OPP |
+| 官方 MatMul 编译 | official.build_official + vendor/cann_8_5_0 | 固定源码、适配清单、实际 tiling、.run、隔离 OPP |
+| Add / 旧 bundled 编译 | build.build_candidate + kernels/ | msopgen 工程、参数头、ONNX parser、.run、独立 OPP |
 | ATC | backend.AscendBackend.evaluate | model.om、atc.log、selection.json |
 | 校验/采样 | worker.execute_om | correctness.json、output.npy、runtime.json、profiling 原始数据 |
 | CSV 导出 | msprof --export=on | op_summary*.csv |
@@ -16,7 +19,7 @@
 
 基线和候选使用相同固定输入与 PyTorch 参考输出。基线去掉 ASCEND_CUSTOM_OPP_PATH，候选只指向当前试验 opp/vendors/ 下的独立安装路径，不改系统默认 OPP。
 
-## 模板
+## Add 与旧 bundled MatMul 模板（非当前 MatMul 默认路径）
 
 Add：UB 队列、DataCopyPad 处理非对齐尾块，Vector Add；tile_elems/buffers/block_dim 编译期注入。Host 查询 UB 与 AIV 核数。
 

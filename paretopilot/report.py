@@ -27,7 +27,8 @@ def roofline_svg(config, baseline, trials):
 def write_report(root, result):
     from .util import read_json
     config = read_json(root/"manifest.json")["config"]
-    (root/"roofline.svg").write_text(roofline_svg(config, result["baseline"], result["history"]), encoding="utf-8")
+    references = [result["source_baseline"]] if "source_baseline" in result else []
+    (root/"roofline.svg").write_text(roofline_svg(config, result["baseline"], references+result["history"]), encoding="utf-8")
     with (root/"trials.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream)
         writer.writerow(["generation", "status", "duration_us", "params", "error"])
@@ -53,6 +54,19 @@ Confirmation compares interleaved fresh baseline/candidate builds. The range thr
 """
     if result["mode"] == "simulation":
         text += "\nAll timings and correctness outcomes are synthetic. No hardware improvement has been measured.\n"
+    if "source_baseline" in result:
+        final = result["confirmation"]
+        text += (f"\nOfficial source: CANN ops-nn 8.5.0, MatMulV3; commit {result['source_baseline']['selection']['commit']}.\n"
+                 "\nThe installed stock baseline and this source build are different implementations.\n"
+                 "\nConfirmation task medians (us), not build/stage wall-clock seconds:\n\n"
+                 f"- Stock CANN: {final.get('baseline_us', 'unavailable')}\n"
+                 f"- Official source defaults: {final.get('source_baseline_us', 'unavailable')}\n"
+                 f"- Tuned source candidate: {final.get('candidate_us', 'unavailable')}\n"
+                 f"- Candidate speedup over stock: {final.get('speedup', 'unavailable')}x\n"
+                 f"- Candidate speedup over source defaults: {final.get('source_speedup', 'unavailable')}x\n"
+                 f"- Tuning gain accepted: {final.get('tuning_accepted', False)}\n"
+                 "\nDefault core_limit=0 preserves device core count; tiling_policy=0 preserves upstream knowledge-bank lookup with heuristic fallback.\n"
+                 "\nSource/default/candidate are rebuilt and measured in alternating order. Identical default parameters never establish tuning gain.\n")
     (root/"report.md").write_text(text, encoding="utf-8")
     rows = ''.join('<tr>'+''.join(f'<td>{html.escape(str(v))}</td>' for v in [t['generation'],t['status'],t.get('duration_us',''),t['params'],t.get('error','')])+'</tr>' for t in result['history'])
     page = '<!doctype html><meta charset="utf-8"><title>ParetoPilot</title><style>body{font:16px system-ui;margin:32px;max-width:1200px}td,th{padding:9px;border-bottom:1px solid #ddd;text-align:left}pre{white-space:pre-wrap}</style>'

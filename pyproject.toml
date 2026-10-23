@@ -19,4 +19,4 @@ paretopilot = "paretopilot.cli:main"
 include = ["paretopilot*"]
 
 [tool.setuptools.package-data]
-paretopilot = ["kernels/*.cpp", "kernels/*.h"]
+paretopilot = ["kernels/*.cpp", "kernels/*.h", "official_adapter/*.cpp", "official_adapter/*.cmake", "vendor/cann_8_5_0/*"]
