@@ -164,6 +164,8 @@ python -m paretopilot run --config examples/ascend910b_matmul.json --output runs
 
 ## 常见故障定位
 
+旧版本的 `Expected one generated ONNX parser; found []` 可能是只查找 .cpp，漏掉了 msopgen 生成的 framework/onnx_plugin/pp_add_plugin.cc。当前版本已支持 .cc/.cpp/.cxx，并保留原生成文件和 CMake 引用。通过 GitHub 更新项目后，使用 `--soc Ascend910B2 --deps check --scope smoke` 创建新试验验证；无需手工重命名生成文件。实际 Ascend C 编译仍须在测试机确认。
+
 | 阶段 | 文件 | 检查方向 |
 | --- | --- | --- |
 | 导出 | case/export.log | Python/PyTorch/ONNX 兼容性，自定义 build_case |

@@ -24,6 +24,8 @@ MatMul：CANN Matmul 高阶 API，Host 设置原始矩阵步长、单块 shape�
 
 msopgen 生成与安装版本匹配的框架。要求 op_host、op_kernel、framework、CMakePresets.json 和 build.sh 布局；不兼容的生成器布局会明确失败，保留工程用于检查。
 
+ONNX parser 在 framework/onnx_plugin 或兼容目录 framework/onnx 中定位，接受 .cc、.cpp、.cxx；保留生成文件的路径、扩展名及原 CMakeLists.txt，在原文件中替换注册实现。910B2 / CANN 8.5.0 测试机实际生成 framework/onnx_plugin/pp_add_plugin.cc。source_manifest.json 记录选中的 onnx_parser 相对路径；零个或多个候选仍报错，并列出生成的 framework 文件，避免误改其他框架的插件。
+
 ## 原生运行要求
 
 PyACL 使用 ACL_HOST 模式，两个输入、一个输出，外部格式为 ND。支持 ND 缓冲区末尾 padding，不支持 blocked 外部布局。每次复制/执行检查返回码，正确性在 profiler.start 之前和 stop 之后检查。

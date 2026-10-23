@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from paretopilot.backend import AscendBackend, environment
-from paretopilot.build import build_candidate
+from paretopilot.build import build_candidate, find_onnx_parser
 from paretopilot.config import load_config
 from paretopilot.util import TuningError, digest, file_hash, read_json, run_command, write_json
 
@@ -19,19 +19,26 @@ class NativeContractTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.c = load_config(ROOT/"examples/ascend910b_add.json")
+        self.c["ascend"]["soc_version"] = "Ascend910B2"
         self.params = {k:v[0] for k,v in self.c["space"].items()}
 
     def test_candidate_build_isolated_and_parameters_materialized(self):
         commands = []
+        parser_path = "framework/onnx_plugin/pp_add_plugin.cc"
+        cmake = 'file(GLOB parser_src "${CMAKE_CURRENT_SOURCE_DIR}/*.cc")\n'
         def command(argv, cwd, log, timeout, env):
             commands.append(argv)
             if argv[0] == "msopgen":
                 project = Path(argv[-1])
-                for name in ("op_host","op_kernel","framework/onnx"):
+                for name in ("op_host","op_kernel","framework/onnx_plugin"):
                     (project/name).mkdir(parents=True)
-                (project/"framework/onnx/parser.cpp").write_text("generated parser")
+                (project/parser_path).write_text("generated parser")
+                (project/"framework/onnx_plugin/CMakeLists.txt").write_text(cmake)
                 write_json(project/"CMakePresets.json", {"configurePresets":[{"cacheVariables":{"vendor_name":{"value":"customize"}}}]})
             elif argv == ["bash","build.sh"]:
+                self.assertIn("ai.onnx::13::PpAdd",(cwd/parser_path).read_text())
+                self.assertEqual((cwd/"framework/onnx_plugin/CMakeLists.txt").read_text(),cmake)
+                self.assertEqual(list((cwd/"framework").rglob("*.cpp")),[])
                 (cwd/"build_out").mkdir()
                 (cwd/"build_out/custom.run").write_text("installer")
             elif argv[0] == "bash":
@@ -47,9 +54,44 @@ class NativeContractTests(unittest.TestCase):
             self.assertIn("#define PP_TILE_ELEMS 256",text)
             self.assertIn(digest(self.params),text)
         self.assertIn("DataCopyPad",(self.root/"project/op_kernel/pp_add.cpp").read_text())
-        self.assertIn("ai.onnx::13::PpAdd",(self.root/"project/framework/onnx/parser.cpp").read_text())
-        self.assertEqual(commands[0][commands[0].index("-c")+1],"ai_core-Ascend910B1")
+        self.assertIn("ai.onnx::13::PpAdd",(self.root/"project"/parser_path).read_text())
+        self.assertEqual(commands[0][commands[0].index("-c")+1],"ai_core-Ascend910B2")
+        self.assertEqual(read_json(self.root/"source_manifest.json")["onnx_parser"],parser_path)
         self.assertEqual(read_json(self.root/"source_manifest.json")["generated_source_sha256"],result["generated_source_sha256"])
+
+    def test_parser_discovery_supports_cpp_variants_and_ignores_other_frameworks(self):
+        for layout in ("onnx_plugin", "onnx"):
+            for extension in (".cc", ".cpp", ".cxx"):
+                with self.subTest(layout=layout, extension=extension):
+                    project = self.root/(layout+extension)
+                    parser = project/"framework"/layout/("pp_matmul_plugin"+extension)
+                    parser.parent.mkdir(parents=True)
+                    parser.write_text("ONNX parser")
+                    other = project/"framework/tf_plugin/other.cc"
+                    other.parent.mkdir()
+                    other.write_text("other framework")
+                    self.assertEqual(find_onnx_parser(project),parser)
+
+    def test_missing_onnx_parser_reports_generated_files(self):
+        framework = self.root/"framework/tf_plugin"
+        framework.mkdir(parents=True)
+        (framework/"other.cc").write_text("TensorFlow only")
+        with self.assertRaises(TuningError) as caught:
+            find_onnx_parser(self.root)
+        message = str(caught.exception)
+        self.assertIn("found []",message)
+        self.assertIn("framework/tf_plugin/other.cc",message)
+        self.assertIn("generate.log",message)
+
+    def test_multiple_onnx_parsers_are_rejected(self):
+        folder = self.root/"framework/onnx_plugin"
+        folder.mkdir(parents=True)
+        for name in ("pp_add_plugin.cc", "other.cpp"):
+            (folder/name).write_text("parser")
+        with self.assertRaises(TuningError) as caught:
+            find_onnx_parser(self.root)
+        self.assertIn("pp_add_plugin.cc",str(caught.exception))
+        self.assertIn("other.cpp",str(caught.exception))
 
     def make_backend(self):
         backend = object.__new__(AscendBackend)

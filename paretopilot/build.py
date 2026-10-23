@@ -8,6 +8,20 @@ def op_names(config):
     return ("PpMatmul", "pp_matmul") if config["operator"]["kind"] == "matmul" else ("PpAdd", "pp_add")
 
 
+def find_onnx_parser(project):
+    project = Path(project)
+    framework = project/"framework"
+    directories = [framework/"onnx_plugin", framework/"onnx"]
+    parsers = sorted(p for directory in directories for p in directory.rglob("*")
+                     if p.is_file() and p.suffix in {".cc", ".cpp", ".cxx"})
+    if len(parsers) != 1:
+        found = [p.relative_to(project).as_posix() for p in parsers]
+        files = sorted(p.relative_to(project).as_posix() for p in framework.rglob("*") if p.is_file())
+        raise TuningError(f"Expected one generated ONNX parser (.cc/.cpp/.cxx) in framework/onnx_plugin or framework/onnx; "
+                          f"found {found}; framework files={files}; inspect {project.parent/'generate.log'}")
+    return parsers[0]
+
+
 def build_candidate(config, params, directory, env):
     directory = Path(directory)
     op, stem = op_names(config)
@@ -30,10 +44,8 @@ def build_candidate(config, params, directory, env):
     shutil.copyfile(templates/f"{stem}_tiling.h", project/"op_host"/f"{stem}_tiling.h")
     shutil.copyfile(templates/f"{stem}_kernel.cpp", project/"op_kernel"/f"{stem}.cpp")
     # Replace only the generated ONNX parser implementation; its generated CMake owns linking.
-    parsers = list((project/"framework").rglob("*.cpp"))
-    if len(parsers) != 1:
-        raise TuningError(f"Expected one generated ONNX parser; found {parsers}")
-    parsers[0].write_text('#include "register/register.h"\nnamespace domi {\n'
+    parser = find_onnx_parser(project)
+    parser.write_text('#include "register/register.h"\nnamespace domi {\n'
         f'Status Parse{op}(const ge::Operator &src, ge::Operator &dst) {{ return SUCCESS; }}\n'
         f'REGISTER_CUSTOM_OP("{op}").FrameworkType(ONNX).OriginOpType("ai.onnx::13::{op}")'
         f'.ParseParamsByOperatorFn(Parse{op}).ImplyType(ImplyType::TVM);\n}}\n', encoding="utf-8")
@@ -54,7 +66,8 @@ def build_candidate(config, params, directory, env):
     update(data)
     write_json(presets, data)
     source_hash = digest({folder: tree_hash(project/folder) for folder in ("op_host", "op_kernel", "framework")})
-    write_json(directory/"source_manifest.json", {"params_sha256": parameter_hash, "generated_source_sha256": source_hash, "presets": data})
+    write_json(directory/"source_manifest.json", {"params_sha256": parameter_hash, "generated_source_sha256": source_hash,
+                                                 "onnx_parser": parser.relative_to(project).as_posix(), "presets": data})
     run_command(["bash", "build.sh"], project, directory/"build.log", timeout, env)
     packages = list((project/"build_out").glob("*.run"))
     if len(packages) != 1:

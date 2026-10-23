@@ -6,6 +6,8 @@
 
 2026-10-23 增量验证：MatMul 实机 CSV 显示 `/MatMul` 的类型为 `BatchMatMulV2`，已修正真实基线示例筛选条件。新增回归测试后，`python -m unittest discover -s tests -p test_profiling.py -v` 的 8 项全部通过；Ascend MatMul 配置 validate 通过。回放所提供的两条记录为 7.520/7.620 μs，同时确认旧类型得到 0 条、两条记录不能满足正式测试的 20 条要求。本次未在本机重跑完整硬件流程。
 
+同日 ONNX parser 修复：测试机目录确认生成文件为 framework/onnx_plugin/pp_add_plugin.cc。`python -m unittest discover -s tests -p test_native_contract.py -v` 的 8 项全部通过，覆盖 .cc/.cpp/.cxx 定位、其他框架隔离、缺失/多文件拒绝、保留 .cc 路径和原 CMake、source_manifest 记录以及 910B2 参数传递。构建命令使用 mock，这些结果不代表已完成真实 CANN 编译。
+
 - 核心：配置约束、Roofline 公式和流量口径、Dummy 不调整参数域、插件域验证。
 - 搜索：固定 seed 可复现、参数去重和预算、失败候选、噪声/小收益回退、已有输出保护。
 - 采样：精确筛选、中位数、重复导出、混合节点、NaN 拒绝。
