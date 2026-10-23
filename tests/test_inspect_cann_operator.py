@@ -1,4 +1,6 @@
 import json
+from contextlib import redirect_stdout, redirect_stderr
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -86,6 +88,36 @@ class InspectCannOperatorTests(unittest.TestCase):
         self.assertEqual(env["ASCEND_OPP_PATH"], "system/opp")
         self.assertEqual(env["DUMP_GE_GRAPH"], "2")
         self.assertEqual(env["ASCEND_CACHE_PATH"], str(self.root/"cache"))
+
+    def test_sudo_execution_is_rejected_before_creating_output(self):
+        output = self.root/"diagnostic"
+        with patch.object(script.sys, "platform", "linux"), \
+             patch.object(script.os, "geteuid", return_value=0, create=True), \
+             patch.dict(script.os.environ, {"SUDO_USER": "ma-user"}), \
+             redirect_stderr(io.StringIO()) as error:
+            with self.assertRaises(SystemExit) as stopped:
+                script.main(["--cann-path", str(self.root/"cann"), "--baseline-dir", str(self.root/"baseline"), "--output", str(output)])
+        self.assertEqual(stopped.exception.code, 2)
+        self.assertIn("Run without sudo", error.getvalue())
+        self.assertFalse(output.exists())
+
+    def test_summary_continues_after_unreadable_atc_log(self):
+        write_json(self.root/"report.json", {"atc_status": "failed"})
+        path = "/cann/opp/built-in/op_impl/ai_core/tbe/impl/ops_legacy/dynamic/batch_matmul_v2.py"
+        write_json(self.root/"registration-and-sources.json", {
+            "registrations": [{"path": "/cann/config/ascend910b/ops-info.json", "entry": {"opFile": "batch_matmul_v2"}}],
+            "candidate_files": [{"path": path, "python": {"functions": [{"name": "batch_matmul_v2"}]}}]})
+        original_read = Path.read_text
+        def read(file, *args, **kwargs):
+            if file.name == "atc.log":
+                raise PermissionError("ATC log belongs to another user")
+            return original_read(file, *args, **kwargs)
+        with patch.object(Path, "read_text", read), redirect_stdout(io.StringIO()) as out:
+            code = script.main(["--summarize", str(self.root)])
+        self.assertEqual(code, 0)
+        self.assertIn("Cannot read this evidence file", out.getvalue())
+        self.assertIn("opFile", out.getvalue())
+        self.assertIn(path, out.getvalue())
 
     def test_replay_failure_still_writes_evidence_and_does_not_claim_trace(self):
         baseline = self.baseline()

@@ -2,6 +2,8 @@
 
 在已通过 smoke 的测试机执行。脚本读取 CANN 安装目录，复用既有内置 baseline 的 ATC 命令；诊断日志、缓存和新 OM 写入独立的 `runs/inspect-bmmv2-*`。它不安装依赖、不修改系统 OPP、不执行性能测试。保留当前环境中的 Python 依赖即可。
 
+不要在诊断命令前加 `sudo`：它会切换用户、Python 环境和文件归属，可能使已安装 NumPy 的 Conda 环境变为缺依赖的系统环境。脚本会在创建输出前检查这种身份切换。可直接用 `/home/ma-user/anaconda3/envs/PyTorch-2.6.0/bin/python3` 启动，报告会记录解释器、前缀、UID 和加载 CANN 环境后 PATH 中的 python3。
+
 ```bash
 cd /home/ma-user/work/ParetoPilot
 git pull --ff-only origin main
@@ -22,6 +24,14 @@ python3 scripts/inspect_cann_operator.py \
 1. `report.txt`：CANN/ATC 路径和版本、原模型哈希、注册文件、候选源码及跟踪状态。
 2. `registration-and-sources.json`：`BatchMatMulV2` 的注册条目，包括可用的 `opFile`、`opInterface`、输入格式/类型、属性；候选 Python 文件的参数、导入和编译/tiling 相关行。
 3. `log-matches.txt`：ATC、Host 日志、编译统计和 dump 图中的相关片段。最多摘录 1000 条，完整日志仍保留。
+
+也可以一次提取报告、ATC 最后 120 行及 910B/V2 相关注册和 Python 入口信息；某个文件不可读时会提示并继续读取其他文件：
+
+```bash
+python3 scripts/inspect_cann_operator.py --summarize runs/inspect-bmmv2-实际目录
+```
+
+如果之前已经通过 sudo 运行，保留旧目录作为诊断证据，使用普通用户重新运行以生成新目录。不要通过 sudo pip 向系统 Python 重新安装依赖。`No module named 'numpy'` 表示 ATC 初始化所使用的 Python 搜索路径缺依赖，并不能证明 V2 内核或其源码有问题。
 
 进一步查看：
 

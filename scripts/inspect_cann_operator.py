@@ -203,18 +203,48 @@ def collect_evidence(output, opened, warnings):
                             return
 
 
+def summarize(output):
+    """Read independent evidence files without one unreadable log hiding the rest."""
+    output = Path(output).expanduser().resolve()
+    for name in ("report.json", "atc.log", "registration-and-sources.json"):
+        print(f"\n=== {name} ===")
+        try:
+            text = (output/name).read_text(encoding="utf-8", errors="replace")
+            if name == "atc.log":
+                print("\n".join(text.splitlines()[-120:]))
+            elif name == "registration-and-sources.json":
+                data = json.loads(text)
+                selected = {"registrations": [r for r in data["registrations"] if "/ascend910b/" in r["path"]],
+                            "candidate_files": [r for r in data["candidate_files"]
+                                                if "/impl/ops_legacy/" in r["path"]
+                                                and r["path"].endswith("/batch_matmul_v2.py")]}
+                print(json.dumps(selected, ensure_ascii=False, indent=2))
+            else:
+                print(text)
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"Cannot read this evidence file: {exc}")
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cann-path", type=Path, required=True)
+    parser.add_argument("--cann-path", type=Path)
     parser.add_argument("--cann-env", type=Path)
-    parser.add_argument("--baseline-dir", type=Path, required=True, help="Existing stock baseline/ with atc.command.json")
+    parser.add_argument("--baseline-dir", type=Path, help="Existing stock baseline/ with atc.command.json")
+    parser.add_argument("--summarize", type=Path, metavar="DIAGNOSTIC_DIR", help="Read an existing report without rerunning ATC")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--scan-only", action="store_true", help="Inspect installed files without replaying ATC")
     parser.add_argument("--no-strace", action="store_true")
     parser.add_argument("--timeout", type=positive, default=3600)
     args = parser.parse_args(argv)
+    if args.summarize:
+        return summarize(args.summarize)
+    if not args.cann_path or not args.baseline_dir:
+        parser.error("--cann-path and --baseline-dir are required unless --summarize is used")
     if not sys.platform.startswith("linux"):
         parser.error("Run on the Linux CANN test machine")
+    if getattr(os, "geteuid", lambda: None)() == 0 and os.environ.get("SUDO_USER"):
+        parser.error("Run without sudo in the activated Conda environment. sudo changes Python/dependency resolution and output ownership; this inspection does not require root.")
     (ROOT/"runs").mkdir(exist_ok=True)
     output = args.output.expanduser().resolve() if args.output else Path(tempfile.mkdtemp(prefix="inspect-bmmv2-", dir=ROOT/"runs"))
     if output.is_relative_to(args.cann_path.expanduser().resolve()):
@@ -222,11 +252,14 @@ def main(argv=None):
     if output.exists() and any(output.iterdir()):
         parser.error("--output must be new or empty")
     output.mkdir(parents=True, exist_ok=True)
-    report = {"operator": OPERATOR, "output": str(output), "warnings": [], "atc_status": "not_run", "trace_status": "not_run"}
+    report = {"operator": OPERATOR, "output": str(output), "warnings": [], "atc_status": "not_run", "trace_status": "not_run",
+              "python": {"executable": sys.executable, "prefix": sys.prefix,
+                         "effective_uid": getattr(os, "geteuid", lambda: None)()}}
     code = 0
     try:
         cann, script, versions = resolve_cann(args.cann_path, args.cann_env)
         env = source_environment(cann, script, output/"cann-env.log")
+        report["python"]["path_python3"] = shutil.which("python3", path=env.get("PATH"))
         report["cann"] = {"root": str(cann), "versions": versions}
         report["original_custom_opp"] = env.get("ASCEND_CUSTOM_OPP_PATH")
         roots = [cann]
