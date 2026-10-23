@@ -10,6 +10,8 @@
 
 同日 ATC tiling key 修复：测试机日志在打印 Host 参数签名后报 `get_v220_kernel_type_mix_flag` / `KeyError: '1'`。Add、MatMul 的 Host 均选择 key 1，旧 Device 模板均缺少对应分支。新增 Host/Device 源码合同测试在修复前检出两个遗漏；补齐 `TILING_KEY_IS(1)` 后，`python -m unittest discover -s tests -p test_native_contract.py -v` 的 9 项全部通过。该检查只验证模板声明对应关系，构建依旧使用 mock；本机没有 CANN/NPU，尚未验证修复后的真实 ATC 转换和设备执行。
 
+同日 MatMul Host 编译修复：测试机 `opbuild` 在 `SetAType/SetBType/SetCType` 三处报告 `AscendC::TPosition has not been declared`。三处改用 Host 的 `matmul_tiling::TPosition`，同时显式限定 CubeFormat、DataType 的命名空间，和[官方 Host tiling 示例](https://www.hiascend.com/document/detail/en/canncommercial/800/apiref/ascendcopapi/atlasascendc_api_07_0683.html)保持一致。重新运行上述原生链路合同测试，9 项通过。本地 mock 不验证 CANN 头文件或 C++ 编译，修复后的真实 MatMul 构建仍需测试机确认。
+
 - 核心：配置约束、Roofline 公式和流量口径、Dummy 不调整参数域、插件域验证。
 - 搜索：固定 seed 可复现、参数去重和预算、失败候选、噪声/小收益回退、已有输出保护。
 - 采样：精确筛选、中位数、重复导出、混合节点、NaN 拒绝。

@@ -164,6 +164,8 @@ python -m paretopilot run --config examples/ascend910b_matmul.json --output runs
 
 ## 常见故障定位
 
+若 MatMul 的 `build.log` 在 `opbuild` 阶段报 `AscendC::TPosition has not been declared`，原因是旧 Host 模板混用了 Device 的枚举命名空间。Host 的 `SetAType/SetBType/SetCType` 已改为 `matmul_tiling::TPosition::GM`，格式和数据类型也显式使用 `matmul_tiling`。随后出现的 `Makefile: No such file or directory` 是前面配置失败的连带结果。通过 GitHub 更新并创建新试验重新构建即可，不需要安装另一个编译器或修改生成目录。
+
 若 ATC 日志已打印 `PARETOPILOT_PARAMS=...`，随后在 `get_v220_kernel_type_mix_flag` 中报 `tiling_key_kernel_type[tiling_key]` / `KeyError: '1'`，对应本项目旧模板的 Host/Device key 不一致：Host 选择了 key 1，Device 未声明对应分支。当前 Add、MatMul 均已补齐 `TILING_KEY_IS(1)`。通过 GitHub 更新后新建试验，重新生成、编译和安装候选；旧 runs 中的工程和 OPP 不会自动更新。测试机可执行：
 
 ```bash

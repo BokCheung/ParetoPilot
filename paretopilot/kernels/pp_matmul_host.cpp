@@ -15,10 +15,10 @@ static ge::graphStatus PpMatmulTiling(gert::TilingContext *ctx) {
     auto platform=platform_ascendc::PlatformAscendC(ctx->GetPlatformInfo());
     if (PP_BLOCK_DIM>platform.GetCoreNumAic()) return ge::GRAPH_FAILED;
     matmul_tiling::MatmulApiTiling api(platform);
-    using namespace matmul_tiling;
-    api.SetAType(AscendC::TPosition::GM, CubeFormat::ND, DataType::DT_FLOAT16);
-    api.SetBType(AscendC::TPosition::GM, CubeFormat::ND, DataType::DT_FLOAT16);
-    api.SetCType(AscendC::TPosition::GM, CubeFormat::ND, DataType::DT_FLOAT16);
+    // Host tiling uses matmul_tiling enums; AscendC::TPosition is a Device API type.
+    api.SetAType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT16);
+    api.SetBType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT16);
+    api.SetCType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT16);
     if (api.SetOrgShape(m, n, k)==-1 || api.SetShape(PP_TILE_M, PP_TILE_N, k)==-1) return ge::GRAPH_FAILED;
     if (api.SetFixSplit(PP_TILE_M, PP_TILE_N, PP_TILE_K)==-1) return ge::GRAPH_FAILED;
     api.EnableBias(false);
