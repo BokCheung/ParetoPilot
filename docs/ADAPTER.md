@@ -22,6 +22,8 @@ Add：UB 队列、DataCopyPad 处理非对齐尾块，Vector Add；tile_elems/bu
 
 MatMul：CANN Matmul 高阶 API，Host 设置原始矩阵步长、单块 shape、base tile；Device 按二维网格分配 tile，处理边缘 tile 并写回原始输出布局。Host 查询 AIC 核数，CANN API 校验 tiling 存储约束。buffers 固定 1，因为该版本不暴露受支持的手动 SetDoubleBuffer 开关。
 
+两个模板的 Host 均设置 `SetTilingKey(1)`，Device 计算路径对应显式的 `if (TILING_KEY_IS(1))` 分支。编译器通过这些分支识别需要生成的 kernel；`KERNEL_TASK_TYPE_DEFAULT` 只设置类型，不能代替 key 分支。Add 保持 AIV_ONLY，MatMul 保持 AIC_ONLY。参见 [CANN 8.5 Host Tiling 基本流程](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/850/opdevg/Ascendcopdevg/atlas_ascendc_10_00021.html)。
+
 msopgen 生成与安装版本匹配的框架。要求 op_host、op_kernel、framework、CMakePresets.json 和 build.sh 布局；不兼容的生成器布局会明确失败，保留工程用于检查。
 
 ONNX parser 在 framework/onnx_plugin 或兼容目录 framework/onnx 中定位，接受 .cc、.cpp、.cxx；保留生成文件的路径、扩展名及原 CMakeLists.txt，在原文件中替换注册实现。910B2 / CANN 8.5.0 测试机实际生成 framework/onnx_plugin/pp_add_plugin.cc。source_manifest.json 记录选中的 onnx_parser 相对路径；零个或多个候选仍报错，并列出生成的 framework 文件，避免误改其他框架的插件。

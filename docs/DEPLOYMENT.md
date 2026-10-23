@@ -164,6 +164,15 @@ python -m paretopilot run --config examples/ascend910b_matmul.json --output runs
 
 ## 常见故障定位
 
+若 ATC 日志已打印 `PARETOPILOT_PARAMS=...`，随后在 `get_v220_kernel_type_mix_flag` 中报 `tiling_key_kernel_type[tiling_key]` / `KeyError: '1'`，对应本项目旧模板的 Host/Device key 不一致：Host 选择了 key 1，Device 未声明对应分支。当前 Add、MatMul 均已补齐 `TILING_KEY_IS(1)`。通过 GitHub 更新后新建试验，重新生成、编译和安装候选；旧 runs 中的工程和 OPP 不会自动更新。测试机可执行：
+
+```bash
+git pull --ff-only
+python3 scripts/test_910b.py --cann-path /usr/local/Ascend/cann-8.5.0 --soc Ascend910B2 --device 0 --deps check --scope smoke
+```
+
+日志中的 Toolkit owner 不一致警告与上述 key 查表异常不同；该错误应先修正 kernel 分支，不需要因此修改 Toolkit 文件所有者。
+
 旧版本的 `Expected one generated ONNX parser; found []` 可能是只查找 .cpp，漏掉了 msopgen 生成的 framework/onnx_plugin/pp_add_plugin.cc。当前版本已支持 .cc/.cpp/.cxx，并保留原生成文件和 CMake 引用。通过 GitHub 更新项目后，使用 `--soc Ascend910B2 --deps check --scope smoke` 创建新试验验证；无需手工重命名生成文件。实际 Ascend C 编译仍须在测试机确认。
 
 | 阶段 | 文件 | 检查方向 |

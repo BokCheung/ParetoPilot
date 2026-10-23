@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,22 @@ class NativeContractTests(unittest.TestCase):
         self.c = load_config(ROOT/"examples/ascend910b_add.json")
         self.c["ascend"]["soc_version"] = "Ascend910B2"
         self.params = {k:v[0] for k,v in self.c["space"].items()}
+
+    def test_host_tiling_keys_have_explicit_device_branches(self):
+        # Check the Host/Device contract without pretending to compile Ascend C.
+        # A default kernel type alone does not declare the Host's tiling keys.
+        for stem in ("pp_add", "pp_matmul"):
+            with self.subTest(operator=stem):
+                folder = ROOT/"paretopilot/kernels"
+                host = (folder/f"{stem}_host.cpp").read_text(encoding="utf-8")
+                kernel = (folder/f"{stem}_kernel.cpp").read_text(encoding="utf-8")
+                host = re.sub(r"//[^\n]*|/\*.*?\*/", "", host, flags=re.S)
+                kernel = re.sub(r"//[^\n]*|/\*.*?\*/", "", kernel, flags=re.S)
+                host_keys = set(re.findall(r"SetTilingKey\(\s*(\d+)\s*\)", host))
+                device_keys = set(re.findall(r"if\s*\(\s*TILING_KEY_IS\(\s*(\d+)\s*\)\s*\)\s*\{", kernel))
+                self.assertTrue(host_keys, f"No literal Host tiling keys found for {stem}")
+                self.assertLessEqual(host_keys, device_keys,
+                                     f"{stem}: Host keys {host_keys} lack kernel dispatch branches {device_keys}")
 
     def test_candidate_build_isolated_and_parameters_materialized(self):
         commands = []

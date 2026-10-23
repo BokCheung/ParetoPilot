@@ -39,6 +39,9 @@ public:
 extern "C" __global__ __aicore__ void pp_add(GM_ADDR a, GM_ADDR b, GM_ADDR c, GM_ADDR workspace, GM_ADDR tiling) {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
     GET_TILING_DATA(data, tiling);
-    AddKernel kernel;
-    kernel.Run(a, b, c, data.length);
+    // Advertise the key selected by Host tiling to the CANN kernel compiler.
+    if (TILING_KEY_IS(1)) {
+        AddKernel kernel;
+        kernel.Run(a, b, c, data.length);
+    }
 }

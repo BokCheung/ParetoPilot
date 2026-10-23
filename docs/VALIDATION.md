@@ -8,6 +8,8 @@
 
 同日 ONNX parser 修复：测试机目录确认生成文件为 framework/onnx_plugin/pp_add_plugin.cc。`python -m unittest discover -s tests -p test_native_contract.py -v` 的 8 项全部通过，覆盖 .cc/.cpp/.cxx 定位、其他框架隔离、缺失/多文件拒绝、保留 .cc 路径和原 CMake、source_manifest 记录以及 910B2 参数传递。构建命令使用 mock，这些结果不代表已完成真实 CANN 编译。
 
+同日 ATC tiling key 修复：测试机日志在打印 Host 参数签名后报 `get_v220_kernel_type_mix_flag` / `KeyError: '1'`。Add、MatMul 的 Host 均选择 key 1，旧 Device 模板均缺少对应分支。新增 Host/Device 源码合同测试在修复前检出两个遗漏；补齐 `TILING_KEY_IS(1)` 后，`python -m unittest discover -s tests -p test_native_contract.py -v` 的 9 项全部通过。该检查只验证模板声明对应关系，构建依旧使用 mock；本机没有 CANN/NPU，尚未验证修复后的真实 ATC 转换和设备执行。
+
 - 核心：配置约束、Roofline 公式和流量口径、Dummy 不调整参数域、插件域验证。
 - 搜索：固定 seed 可复现、参数去重和预算、失败候选、噪声/小收益回退、已有输出保护。
 - 采样：精确筛选、中位数、重复导出、混合节点、NaN 拒绝。
