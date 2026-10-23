@@ -52,7 +52,7 @@ class OfficialMatmulTests(unittest.TestCase):
             for n in z.namelist():
                 if not n.endswith('/') and (project/n).read_bytes() != z.read(n):
                     changed.add(n)
-        self.assertEqual(changed, {official.HOST, "CMakeLists.txt", "common/CMakeLists.txt",
+        self.assertEqual(changed, {official.HOST, official.INFER, "CMakeLists.txt", "common/CMakeLists.txt",
                                   "cmake/third_party/nlohmann_json.cmake", "cmake/third_party/makeself-fetch.cmake"})
         self.assertEqual(provenance["commit"], official.COMMIT)
         host = (project/official.HOST).read_text(encoding="utf-8")
@@ -61,6 +61,31 @@ class OfficialMatmulTests(unittest.TestCase):
         self.assertIn("PARETOPILOT_TILING=", host)
         self.assertNotIn("PP_TILE_M", host)
         self.assertTrue((project/"third_party/makeself/makeself.sh").is_file())
+
+    def test_source_default_and_candidate_share_dtype_registration_and_original_shape_inference(self):
+        with zipfile.ZipFile(official.VENDOR/"ops-nn-matmul.zip") as z:
+            original = z.read(official.INFER)
+        shape_source = original.decode().replace("\r\n", "\n").split("} // namespace\nnamespace ops {")[0]
+        generated = []
+        for name, params in (("source_baseline", official.DEFAULT_PARAMS),
+                             ("candidate", {"core_limit": 12, "tiling_policy": 1})):
+            with self.subTest(role=name):
+                project = self.root/name
+                provenance = official.materialize(project, params)
+                source = (project/official.INFER).read_text(encoding="utf-8")
+                generated.append(source)
+                # Keep all upstream shape logic; extend its existing registration,
+                # since a second registration could replace the shape callback.
+                self.assertTrue(source.startswith(shape_source))
+                self.assertEqual(source.count("IMPL_OP_INFERSHAPE(MatMulV3)"), 1)
+                self.assertRegex(source, r"IMPL_OP_INFERSHAPE\(MatMulV3\)\s*"
+                                 r"\.InferShape\(InferShapeForMatMulV3\)\s*"
+                                 r"\.InferDataType\(InferDataTypeForMatMulV3\);")
+                self.assertIn("return context->SetOutputDataType(0, context->GetInputDataType(0));", source)
+                patches = [p for p in provenance["patches"] if p["path"] == official.INFER]
+                self.assertEqual(patches[0]["before_sha256"], hashlib.sha256(original).hexdigest())
+                self.assertEqual(patches[-1]["after_sha256"], hashlib.sha256((project/official.INFER).read_bytes()).hexdigest())
+        self.assertEqual(generated[0], generated[1])
 
     def test_archive_tampering_fails_before_extraction(self):
         manifest = read_json(official.VENDOR/"manifest.json")

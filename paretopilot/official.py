@@ -1,7 +1,7 @@
 """Pinned CANN MatMulV3 sources, offline build adapter, and tiling controls.
 
 The device implementation is upstream code. Patches are restricted to build
-integration and two inputs to the original host tiling decision process.
+and graph integration and two inputs to the original host tiling process.
 """
 import json
 from pathlib import Path
@@ -18,6 +18,7 @@ KIND = "cann_matmul_v3"
 DEFAULT_PARAMS = {"core_limit": 0, "tiling_policy": 0}
 VENDOR = Path(__file__).parent/"vendor/cann_8_5_0"
 HOST = "matmul/mat_mul_v3/op_host/op_tiling/matmul_v3_base_tiling.cpp"
+INFER = "matmul/mat_mul_v3/op_host/mat_mul_v3_infershape.cpp"
 
 
 def enabled(config):
@@ -100,6 +101,20 @@ def materialize(project, params):
             'else()\n    message(FATAL_ERROR "Bundled nlohmann/json headers missing; network downloads disabled")\n    include(ExternalProject)')
     replace("cmake/third_party/makeself-fetch.cmake", '    set(MAKESELF_URL ',
             '    message(FATAL_ERROR "Bundled makeself missing; network downloads disabled")\n    set(MAKESELF_URL ')
+
+    # The pinned MatMulV3 registers only shape inference. Its custom OPP needs
+    # dtype inference for ATC; y has x1's dtype in the upstream OpDef. Extend the
+    # same registration (as upstream GemmV2 does), preserving shape inference.
+    replace(INFER, "} // namespace\nnamespace ops {", """// ParetoPilot: supply the graph-mode dtype rule for the isolated custom OPP.
+static ge::graphStatus InferDataTypeForMatMulV3(gert::InferDataTypeContext* context)
+{
+    return context->SetOutputDataType(0, context->GetInputDataType(0));
+}
+
+} // namespace
+namespace ops {""")
+    replace(INFER, "IMPL_OP_INFERSHAPE(MatMulV3).InferShape(InferShapeForMatMulV3);",
+            "IMPL_OP_INFERSHAPE(MatMulV3)\n        .InferShape(InferShapeForMatMulV3)\n        .InferDataType(InferDataTypeForMatMulV3);")
 
     replace(HOST, '#include "matmul_v3_base_tiling.h"',
             '#include "matmul_v3_base_tiling.h"\n#include "paretopilot_params.h"\n#include <cstdio>')

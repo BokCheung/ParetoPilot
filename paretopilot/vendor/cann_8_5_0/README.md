@@ -23,6 +23,9 @@ The build uses the selected machine's licensed CANN development libraries.
 No network download or system OPP modification is part of the build.
 
 Build adaptations disable unused generic ONNX/protobuf/Eigen dependencies and
-add a GE Operator ONNX parser. Host adaptations expose a core budget and
-knowledge-bank policy, and print provenance/effective tiling. Defaults retain
-the original tiling decisions. See docs/OFFICIAL_MATMUL.md for limitations.
+add a GE Operator ONNX parser. Graph integration adds MatMulV3's missing dtype
+inference to its existing shape registration: output y takes input x1's dtype,
+consistent with the upstream OpDef. The upstream shape callback is unchanged.
+Host adaptations expose a core budget and knowledge-bank policy, and print
+provenance/effective tiling. Defaults retain the original tiling decisions.
+See docs/OFFICIAL_MATMUL.md for limitations.

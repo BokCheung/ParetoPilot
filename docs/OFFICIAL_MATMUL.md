@@ -34,6 +34,10 @@ python3 scripts/test_910b.py \
 
 `--deps check` 不安装 Python 包。官方源码构建的 JSON/makeself 依赖已内置；不下载 protobuf、Abseil 或 Eigen。使用基于 GE Operator 的简短 ONNX parser 连接现有 ATC 流程，因此不需要上游通用 ONNX parser 的 protobuf 工具链。
 
+固定版本的 `MatMulV3` 只注册了形状推导。隔离自定义 OPP 的 ATC 路径还需要数据类型推导，因此适配层在同一条 `IMPL_OP_INFERSHAPE(MatMulV3)` 注册中补上 `InferDataType`：输出 `y` 的类型取输入 `x1` 的类型，与官方 OpDef 一致，当前用例均为 FP16。原有形状推导和 Device kernel 保持原样，默认源码与候选使用相同的类型推导适配。
+
+若旧版本报 `Can not find Node target[MatMulV3] custom infer_datatype func`，更新 GitHub 代码后重新运行 smoke，脚本会在新目录重建 OPP。无需修改 CANN 安装目录或设置 `IGNORE_INFER_ERROR=1`；该适配也会记录在 `source_manifest.json` 的补丁哈希中。
+
 ## 三路测量与判定
 
 1. `baseline/`：内置 ONNX MatMul → ATC，清除自定义 OPP 路径。
