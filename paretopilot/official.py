@@ -19,6 +19,7 @@ DEFAULT_PARAMS = {"core_limit": 0, "tiling_policy": 0}
 VENDOR = Path(__file__).parent/"vendor/cann_8_5_0"
 HOST = "matmul/mat_mul_v3/op_host/op_tiling/matmul_v3_base_tiling.cpp"
 INFER = "matmul/mat_mul_v3/op_host/mat_mul_v3_infershape.cpp"
+IMPL_CMAKE = "cmake/gen_ops_info.cmake"
 
 
 def enabled(config):
@@ -102,6 +103,24 @@ def materialize(project, params):
     replace("cmake/third_party/makeself-fetch.cmake", '    set(MAKESELF_URL ',
             '    message(FATAL_ERROR "Bundled makeself missing; network downloads disabled")\n    set(MAKESELF_URL ')
 
+    # These Python adapters do not exist at configure time. Upstream's GLOB
+    # freezes an empty file list on a fresh build, silently omitting dynamic/.
+    # Enumerate at install/package time, after ascendc_impl_gen has run.
+    replace(IMPL_CMAKE, """  file(GLOB dynamic_impl ${OPIMPL_OUT_DIR}/dynamic/*.py)
+  if(ENABLE_PACKAGE)
+    install(
+      FILES ${dynamic_impl}
+      DESTINATION ${OPIMPL_INSTALL_DIR}
+      OPTIONAL
+    )
+  endif()""", """  if(ENABLE_PACKAGE)
+    install(
+      DIRECTORY "${OPIMPL_OUT_DIR}/dynamic/"
+      DESTINATION ${OPIMPL_INSTALL_DIR}
+      FILES_MATCHING PATTERN "*.py"
+    )
+  endif()""")
+
     # The pinned MatMulV3 registers only shape inference. Its custom OPP needs
     # dtype inference for ATC; y has x1's dtype in the upstream OpDef. Extend the
     # same registration (as upstream GemmV2 does), preserving shape inference.
@@ -148,6 +167,29 @@ namespace ops {""")
             "device_source_sha256": tree_hash(project/"matmul/mat_mul_v3/op_kernel")}
 
 
+def generated_implementations(build):
+    dynamic = Path(build)/"tbe/dynamic"
+    if not (dynamic/"mat_mul_v3.py").is_file():
+        raise TuningError(f"Official MatMul Python adapter was not generated: {dynamic/'mat_mul_v3.py'}; see generate.log")
+    return sorted(dynamic.glob("*.py"))
+
+
+def verify_installed_implementations(generated, vendor):
+    """Reject incomplete/stale OPP packages before ATC tries to import them."""
+    tbe = Path(vendor)/"op_impl/ai_core/tbe"
+    dynamic = tbe/(Path(vendor).name+"_impl")/"dynamic"
+    hashes = {}
+    for source in generated:
+        installed = dynamic/source.name
+        if not installed.is_file():
+            raise TuningError(f"Official MatMul OPP is missing Python adapter: {installed}; see build.log and install.log")
+        expected = file_hash(source)
+        if file_hash(installed) != expected:
+            raise TuningError(f"Official MatMul installed Python adapter differs from generated source: {installed}")
+        hashes[installed.relative_to(tbe).as_posix()] = expected
+    return hashes
+
+
 def build_official(config, params, directory, env):
     legacy, legacy_relative = legacy_library(env)
     project = directory/"project"
@@ -168,6 +210,8 @@ def build_official(config, params, directory, env):
     for name, command in commands:
         record = run_command(command, project, directory/f"{name}.log", timeout, env)
         write_json(directory/f"{name}.command.json", record)
+        if name == "generate":
+            implementations = generated_implementations(build)
     packages = sorted((project/"build_out").glob("*.run"))
     if len(packages) != 1:
         raise TuningError(f"Expected one official custom OPP package, found {packages}; see build.log")
@@ -182,11 +226,13 @@ def build_official(config, params, directory, env):
     vendors = [p for p in (install/"vendors").iterdir() if p.is_dir()]
     if len(vendors) != 1:
         raise TuningError("Expected one isolated official MatMul OPP vendor")
+    implementation_hashes = verify_installed_implementations(implementations, vendors[0])
     parser = vendors[0]/"framework/onnx"
     parser.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(build/"libparetopilot_onnx.so", parser/"libparetopilot_onnx.so")
     result = {**provenance, "implementation": KIND, "op_type": "MatMulV3", "opp_path": str(vendors[0]),
               "source_dir": str(project), "package": str(packages[0]), "installed_sha256": tree_hash(vendors[0]),
+              "python_implementations": implementation_hashes,
               "legacy_library": str(legacy), "legacy_library_sha256": file_hash(legacy_copy)}
     write_json(directory/"build_manifest.json", result)
     return result

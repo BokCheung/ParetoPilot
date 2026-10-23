@@ -38,6 +38,8 @@ python3 scripts/test_910b.py \
 
 若旧版本报 `Can not find Node target[MatMulV3] custom infer_datatype func`，更新 GitHub 代码后重新运行 smoke，脚本会在新目录重建 OPP。无需修改 CANN 安装目录或设置 `IGNORE_INFER_ERROR=1`；该适配也会记录在 `source_manifest.json` 的补丁哈希中。
 
+上游打包规则在 CMake 配置阶段收集 `dynamic/*.py`，而这些 Python 编译入口在后续 `ascendc_impl_gen` 阶段才生成。首次构建会因此漏装 `paretopilot_nn_impl/dynamic`，导致 ATC 报 `No module named 'paretopilot_nn_impl.dynamic'`。适配层改为安装阶段收集 Python 文件；生成阶段必须产出 `mat_mul_v3.py`，安装后再逐个核对生成入口的路径和 SHA256，缺失或不一致会在 ATC 之前失败。更新 GitHub 后重新运行 smoke 即可重建。
+
 ## 三路测量与判定
 
 1. `baseline/`：内置 ONNX MatMul → ATC，清除自定义 OPP 路径。
@@ -64,6 +66,7 @@ python3 scripts/test_910b.py \
 
 - `paretopilot/vendor/cann_8_5_0/manifest.json`：固定提交、源码逐文件 SHA256、归档 SHA256、依赖版本和许可证。
 - 每个源码构建目录的 `source_manifest.json`：原始来源、适配修改前后哈希、参数哈希、生成源码哈希、未改 Device 源码哈希。
+- `build_manifest.json` 的 `python_implementations`：已核验的 Python 编译入口相对 TBE 目录的路径及 SHA256。
 - `configure.log`：官方 CMake 和开发依赖检查；`generate.log`：opbuild 及动态编译入口生成；`build.log`：Host 库、parser 与 OPP 打包；`install.log`：隔离安装。
 - `atc.log`：必须同时出现参数签名、官方提交签名和 `PARETOPILOT_TILING`，记录实际核数、baseM/N/K、tiling key。缺签名不能进入性能验收。
 - `selection.json` 与 `summary.json` 的 `selection`：保留上述实际 tiling、安装产物及 OM 哈希。

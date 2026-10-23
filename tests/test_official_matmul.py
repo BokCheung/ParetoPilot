@@ -4,7 +4,11 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -52,7 +56,7 @@ class OfficialMatmulTests(unittest.TestCase):
             for n in z.namelist():
                 if not n.endswith('/') and (project/n).read_bytes() != z.read(n):
                     changed.add(n)
-        self.assertEqual(changed, {official.HOST, official.INFER, "CMakeLists.txt", "common/CMakeLists.txt",
+        self.assertEqual(changed, {official.HOST, official.INFER, official.IMPL_CMAKE, "CMakeLists.txt", "common/CMakeLists.txt",
                                   "cmake/third_party/nlohmann_json.cmake", "cmake/third_party/makeself-fetch.cmake"})
         self.assertEqual(provenance["commit"], official.COMMIT)
         host = (project/official.HOST).read_text(encoding="utf-8")
@@ -86,6 +90,76 @@ class OfficialMatmulTests(unittest.TestCase):
                 self.assertEqual(patches[0]["before_sha256"], hashlib.sha256(original).hexdigest())
                 self.assertEqual(patches[-1]["after_sha256"], hashlib.sha256((project/official.INFER).read_bytes()).hexdigest())
         self.assertEqual(generated[0], generated[1])
+
+    @unittest.skipUnless(shutil.which("cmake"), "CMake required for install regression")
+    def test_cmake_installs_python_adapters_generated_after_configuration(self):
+        patched = self.root/"patched"
+        official.materialize(patched, official.DEFAULT_PARAMS)
+        with zipfile.ZipFile(official.VENDOR/"ops-nn-matmul.zip") as z:
+            original = z.read(official.IMPL_CMAKE).decode()
+
+        def command(argv, cwd, env=None):
+            result = subprocess.run(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            return result.stdout
+
+        for name, cmake in (("original", original), ("fixed", (patched/official.IMPL_CMAKE).read_text(encoding="utf-8"))):
+            with self.subTest(version=name):
+                source = self.root/name
+                source.mkdir()
+                (source/"gen_ops_info.cmake").write_text(cmake, encoding="utf-8")
+                (source/"CMakeLists.txt").write_text('''cmake_minimum_required(VERSION 3.16)
+project(PackageRegression NONE)
+set(ENABLE_PACKAGE ON)
+include(gen_ops_info.cmake)
+add_ops_impl_target(TARGET adapters
+    OPS_INFO_DIR "${CMAKE_BINARY_DIR}/autogen"
+    IMPL_DIR "${CMAKE_BINARY_DIR}/tbe/ascendc"
+    OUT_DIR "${CMAKE_BINARY_DIR}/tbe"
+    INSTALL_DIR "op_impl/ai_core/tbe/paretopilot_nn_impl/dynamic")
+''', encoding="utf-8")
+                build, vendor = source/"build", source/"paretopilot_nn"
+                generator = ["-G", "Ninja"] if shutil.which("ninja") else []
+                command(["cmake", "-S", str(source), "-B", str(build), *generator], source)
+                # Simulate only the CANN generator. CMake configuration and
+                # installation are real, and there is no second configure.
+                dynamic = build/"tbe/dynamic"
+                dynamic.mkdir(parents=True)
+                for module in ("mat_mul_v3", "batch_mat_mul_v3"):
+                    (dynamic/(module+".py")).write_text("VALUE = 'generated after configure'\n")
+                (dynamic/"not-an-adapter.txt").write_text("exclude")
+                command(["cmake", "--install", str(build), "--prefix", str(vendor)], source)
+                installed = vendor/"op_impl/ai_core/tbe/paretopilot_nn_impl/dynamic"
+                if name == "original":
+                    self.assertFalse((installed/"mat_mul_v3.py").exists())
+                    continue
+                hashes = official.verify_installed_implementations(official.generated_implementations(build), vendor)
+                self.assertEqual(len(hashes), 2)
+                self.assertFalse((installed/"not-an-adapter.txt").exists())
+                output = command([sys.executable, "-c",
+                                  "from paretopilot_nn_impl.dynamic import mat_mul_v3; print(mat_mul_v3.VALUE)"],
+                                 source, {**os.environ, "PYTHONPATH": str(vendor/"op_impl/ai_core/tbe")})
+                self.assertEqual(output.strip(), "generated after configure")
+
+    def test_python_adapter_checks_reject_missing_and_stale_installations(self):
+        build, vendor = self.root/"build", self.root/"paretopilot_nn"
+        with self.assertRaisesRegex(TuningError, "was not generated"):
+            official.generated_implementations(build)
+        generated = build/"tbe/dynamic/mat_mul_v3.py"
+        generated.parent.mkdir(parents=True)
+        generated.write_bytes(b"new adapter")
+        files = official.generated_implementations(build)
+        with self.assertRaisesRegex(TuningError, "OPP is missing Python adapter"):
+            official.verify_installed_implementations(files, vendor)
+        installed = vendor/"op_impl/ai_core/tbe/paretopilot_nn_impl/dynamic/mat_mul_v3.py"
+        installed.parent.mkdir(parents=True)
+        installed.write_bytes(b"old adapter")
+        with self.assertRaisesRegex(TuningError, "differs from generated"):
+            official.verify_installed_implementations(files, vendor)
+        installed.write_bytes(generated.read_bytes())
+        self.assertEqual(official.verify_installed_implementations(files, vendor),
+                         {"paretopilot_nn_impl/dynamic/mat_mul_v3.py": hashlib.sha256(generated.read_bytes()).hexdigest()})
 
     def test_archive_tampering_fails_before_extraction(self):
         manifest = read_json(official.VENDOR/"manifest.json")
@@ -147,6 +221,10 @@ class OfficialMatmulTests(unittest.TestCase):
         legacy.write_bytes(b"legacy fixture")
         def command(argv, cwd, log, timeout, env):
             calls.append(argv)
+            if "ascendc_impl_gen" in argv:
+                dynamic = self.root/"project/build/tbe/dynamic"
+                dynamic.mkdir(parents=True)
+                (dynamic/"mat_mul_v3.py").write_text("generated adapter fixture")
             if "package" in argv:
                 out = self.root/"project/build_out"
                 out.mkdir(parents=True)
@@ -156,11 +234,14 @@ class OfficialMatmulTests(unittest.TestCase):
                 (build/"libparetopilot_onnx.so").write_text("parser fixture")
             if argv[0] == "bash":
                 self.assertEqual(argv[-1], "--install-path="+str(self.root/"opp"))
-                (self.root/"opp/vendors/paretopilot_nn").mkdir(parents=True)
+                dynamic = self.root/"opp/vendors/paretopilot_nn/op_impl/ai_core/tbe/paretopilot_nn_impl/dynamic"
+                dynamic.mkdir(parents=True)
+                shutil.copyfile(self.root/"project/build/tbe/dynamic/mat_mul_v3.py", dynamic/"mat_mul_v3.py")
             return {"argv": argv}
         with patch.object(official, "run_command", side_effect=command), patch.object(official.platform, "machine", return_value="aarch64"):
             result = official.build_official(self.c, official.DEFAULT_PARAMS.copy(), self.root, {"ASCEND_OPP_PATH": str(self.root/"system-opp")})
         self.assertEqual(result["commit"], official.COMMIT)
+        self.assertIn("paretopilot_nn_impl/dynamic/mat_mul_v3.py", result["python_implementations"])
         self.assertTrue(Path(result["opp_path"]).is_relative_to(self.root))
         self.assertTrue((Path(result["opp_path"])/"framework/onnx/libparetopilot_onnx.so").exists())
         self.assertEqual((self.root/"opp"/legacy_relative).read_bytes(), legacy.read_bytes())

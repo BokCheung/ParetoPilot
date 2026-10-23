@@ -29,3 +29,8 @@ consistent with the upstream OpDef. The upstream shape callback is unchanged.
 Host adaptations expose a core budget and knowledge-bank policy, and print
 provenance/effective tiling. Defaults retain the original tiling decisions.
 See docs/OFFICIAL_MATMUL.md for limitations.
+
+The Python adapter install rule enumerates dynamic/*.py at install time, after
+generation, instead of freezing an empty file list during initial configuration.
+Generated adapters are checked for presence and matching hashes in the installed
+OPP before ATC runs; build_manifest.json records the verified Python files.
