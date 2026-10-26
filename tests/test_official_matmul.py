@@ -305,7 +305,7 @@ add_ops_impl_target(TARGET adapters
         class Backend:
             def __init__(inner, config, root): pass
             def evaluate(inner, params, directory, role):
-                return {"status": "ok", "mode": "ascend", "duration_us": {"baseline": 12, "source_baseline": 10, "candidate": 8}[role],
+                return {"status": "ok", "mode": "ascend", "operator_identity": {"Op Type": "MatMulV3"}, "duration_us": {"baseline": 12, "source_baseline": 10, "candidate": 8}[role],
                         "measured_bytes": None, "correctness": {"passed": True},
                         "selection": {"commit": official.COMMIT, "effective_tiling": [{"used_core_num": 12}]}}
         with patch("paretopilot.search.AscendBackend", Backend), patch("paretopilot.search.inspect_environment", return_value={"ready": True}):

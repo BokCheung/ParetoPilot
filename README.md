@@ -85,7 +85,7 @@ python3 scripts/test_910b.py \
 
 这两个配置标为 `implementation.kind=baseline_only`，参数域为空。当前候选适配器只支持二维，因此三维阶段不会调用源码候选或 Agent，也不报告调优收益；`--scope full` 对它们仍只测基线。Roofline 和 Dummy Agent 接口继续保留，后续接入三维候选时再扩展参数域。Roofline 的共享权重流量只计一份，独立批次权重计 batch 份；这是形状下界，不代表实测 DRAM 流量。
 
-配置中的 `operator.batch` 与 `operator.batch_mode` 必须同时设置，模式为 `shared_rhs` 或 `batched_rhs`。即使 batch 为 1，也保留三维输入。默认 profiling 选择器为 `BatchMatMulV2`，会严格要求恰好 20 个目标样本；ATC 实际降图若选择其他算子，先用 `inspect-profile` 确认表中算子名与计数，再调整对应基线选择器，不能把其他任务混入耗时。
+配置中的 `operator.batch` 与 `operator.batch_mode` 必须同时设置，模式为 `shared_rhs` 或 `batched_rhs`。即使 batch 为 1，也保留三维输入。默认自动识别实际 MatMul profiling 算子，并严格要求恰好 20 个唯一目标任务样本；识别有歧义时先查看 `profile_inventory.json`，不能把其他任务混入耗时。
 
 ## 自定义基线与未来 Agent
 
@@ -101,3 +101,29 @@ python -m unittest discover -s tests -v
 ```
 
 标准库覆盖控制器和模拟闭环；安装 numpy 后运行 PyACL mock 与数值检查；安装 torch/onnx 后额外运行真实 PyTorch→ONNX 导出测试。缺依赖的相关测试会明确 skip。PyACL mock 只验证调用顺序和清理，不证明 NPU kernel 正确或可编译。
+
+
+## 先识别实际 MatMul 算子，再匹配源码
+
+Ascend MatMul 现在默认先运行内置 baseline，从导出的 profiling CSV 自动识别实际
+`Op Name`、`Op Type` 和设备/流/模型身份，再匹配相同 GE 算子类型的源码适配器。
+不再用配置中预设的 `BatchMatMulV2` 选择器猜测 baseline 类型。识别仍要求唯一目标
+MatMul 任务、恰好 `repeats` 个样本；有多个目标或未知类型时保留 inventory 并报错。
+
+每个 baseline 目录中的 `profile_inventory.json` 记录全部任务，运行根目录的
+`routing.json` 记录实际算子、形状、匹配的源码适配器及是否支持调优。
+`report.html` 也显示识别结果。Roofline 使用该 shape 的 FLOP/流量分析，只有匹配
+源码适配器后才进入 Dummy Agent、参数域搜索及确认测量。
+
+目前适配器支持二维 `MatMulV3` 的固定版本官方源码。只有 baseline 确实选择
+`MatMulV3` 时才会构建该源码；候选和复测的 profiling 类型必须一致。
+如果测得 `BatchMatMulV2`，则保留其 baseline 并记录 `tuning_supported=false`，
+不会替换成 `MatMulV3`。三维源码候选仍未接入。一键脚本遇到未支持的映射后跳过
+该用例的 smoke/full 候选阶段，结果标为 `tuning_unavailable`；这表示基线测试完成，
+并不表示完成了调优。
+
+算子类型相同不能证明内部 kernel、编译分支或源码版本完全相同。接入安装版
+`BatchMatMulV2` 还需要之前的源码/编译入口诊断结果；`routing.json` 会给出
+`inspection_argv`，指向刚测量的 baseline。诊断不修改系统 CANN 安装。
+如确需复现旧版跨算子比较，可显式设置
+`implementation.require_same_operator=false`；默认同算子策略保持开启。

@@ -3,11 +3,14 @@ from copy import deepcopy
 from pathlib import Path
 import random
 import statistics
+import sys
+import os
 from .agent import load_agent, validate_proposal
 from .backend import AscendBackend, SimulationBackend, evaluate
 from .doctor import inspect_environment
 from .report import write_report, write_baseline_report
 from .workload import baseline_only as baseline_config
+from .routing import same_operator, route, check_identity
 from .space import enumerate_space, legal
 from .official import enabled as official_enabled, DEFAULT_PARAMS
 from .util import TuningError, digest, file_hash, tree_hash, write_json
@@ -98,7 +101,10 @@ def run(config, output, progress=None, baseline_only=False):
         manifest["agent_source_sha256"] = file_hash(config["agent"]["path"])
     write_json(root/"manifest.json", manifest)
     if config["backend"] == "ascend":
-        environment = inspect_environment(config)
+        preflight = deepcopy(config)
+        if same_operator(config):
+            preflight["implementation"] = {"kind": "baseline_only"}
+        environment = inspect_environment(preflight)
         write_json(root/"environment.json", environment)
         if not environment["ready"]:
             raise TuningError(f"Environment checks failed; see {root/'environment.json'} and run doctor")
@@ -106,13 +112,33 @@ def run(config, output, progress=None, baseline_only=False):
     baseline = evaluate(backend, config, {}, root/"baseline", "baseline")
     if baseline["status"] != "ok":
         raise TuningError(f"Baseline failed: {baseline['error']}")
-    if baseline_only:
+    routing = None
+    if same_operator(config):
+        routing = route(config, baseline)
+        if routing["operator_identity"].get("Op Type") == "BatchMatMulV2" and not routing["tuning_supported"]:
+            routing["inspection_argv"] = [sys.executable, str(Path(__file__).resolve().parents[1]/"scripts/inspect_cann_operator.py"),
+                                          "--baseline-dir", str(root/"baseline"), "--cann-path", os.environ.get("ASCEND_HOME_PATH") or os.environ.get("ASCEND_TOOLKIT_HOME") or "<CANN_PATH>", "--no-strace"]
+        if not routing["tuning_supported"]:
+            baseline["roofline"]["suggested_priority"] = []
+            write_json(root/"baseline/trial.json", baseline)
+        write_json(root/"routing.json", routing)
+    if baseline_only or (routing and not routing["tuning_supported"]):
         write_json(root/"baseline_summary.json", baseline)
         write_baseline_report(root, config, baseline)
-        return {"mode": config["backend"], "baseline_us": baseline["duration_us"], "report": str(root/"report.html")}
+        result = {"mode": config["backend"], "baseline_us": baseline["duration_us"], "report": str(root/"report.html")}
+        if routing:
+            result.update(tuning_supported=routing["tuning_supported"], operator_identity=routing["operator_identity"], reason=routing["reason"])
+            write_json(root/"summary.json", {**result, "status": "baseline_only", "baseline": baseline, "routing": routing, "selected": "baseline"})
+        return result
+    if routing:
+        environment = inspect_environment(config)
+        write_json(root/"candidate_environment.json", environment)
+        if not environment["ready"]:
+            raise TuningError(f"Matched source adapter environment checks failed; see {root/'candidate_environment.json'}")
     source_baseline = None
     if official_enabled(config):
         source_baseline = evaluate(backend, config, DEFAULT_PARAMS.copy(), root/"source_baseline", "source_baseline")
+        check_identity(config, baseline, source_baseline)
         if source_baseline["status"] != "ok":
             raise TuningError(f"Official source baseline failed: {source_baseline['error']}")
     agent = load_agent(config["agent"])
@@ -123,6 +149,8 @@ def run(config, output, progress=None, baseline_only=False):
         context = {"schema_version": 1, "generation": generation, "operator": config["operator"], "hardware": config["hardware"],
                    "original_space": config["space"], "baseline": source_baseline or baseline, "best": ranked[0] if ranked else None,
                    "roofline": ranked[0]["roofline"] if ranked else (source_baseline or baseline)["roofline"], "history": history}
+        if routing:
+            context["source_adapter"] = routing
         if source_baseline:
             context["stock_baseline"] = baseline
         # A local plugin cannot mutate controller state through its input.
@@ -141,6 +169,11 @@ def run(config, output, progress=None, baseline_only=False):
             if len(seen) >= config["search"]["budget"]:
                 break
             trial = evaluate(backend, config, p, root/f"trials/{len(seen):05d}", "candidate")
+            try:
+                check_identity(config, baseline, trial)
+            except TuningError as exc:
+                trial.update(status="failed", error=str(exc))
+                write_json(root/f"trials/{len(seen):05d}/trial.json", trial)
             trial["generation"] = generation
             seen.add(digest(p))
             history.append(trial)
@@ -157,6 +190,8 @@ def run(config, output, progress=None, baseline_only=False):
               "confirmation": final, "selected": selected,
               "selected_params": winner["params"] if selected == "candidate" else DEFAULT_PARAMS.copy() if selected == "source_baseline" else None,
               "history": history, "agent_decisions": decisions}
+    if routing:
+        result["routing"] = routing
     if source_baseline:
         result["source_baseline"] = source_baseline
     write_json(root/"summary.json", result)

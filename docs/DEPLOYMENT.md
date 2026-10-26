@@ -221,8 +221,33 @@ Timing is the median target task duration in microseconds; stage seconds include
 compilation and profiling overhead. The generated `case/case.json` records the
 fixed shapes passed to ATC and checked against the compiled OM by the runtime.
 
-The default exact operator selector is `BatchMatMulV2`. If exported profiling
-uses another operator after graph lowering, inspect that stage's `op_summary*.csv`
-with `python3 -m paretopilot inspect-profile /path/to/op_summary.csv` and update
-`measurement.selectors.baseline` in the relevant example configuration. Do not
-combine different tasks to satisfy the required sample count.
+The default same-operator policy discovers the actual MatMul task identity from
+profiling instead of assuming the baseline selector's Op Type. If discovery is
+ambiguous, inspect `profile_inventory.json` or use
+`python3 -m paretopilot inspect-profile /path/to/op_summary.csv`. Do not combine
+different tasks to satisfy the required sample count.
+
+
+## Discover the lowered operator before tuning
+
+Ascend MatMul defaults to the same-operator policy. Run the existing acceptance
+command with `--operator matmul --matmul-case all --scope smoke --deps check` to
+cover 2D plus both 3D shapes. Each baseline runs first and records the actual
+operator in `routing.json` and `baseline_summary.json` (the latter is written for
+baseline commands and unsupported routes). Its task inventory is in
+`baseline/profile_inventory.json`. The one-command suite baseline-stage root
+is named `matmul-baseline`, `matmul-shared-rhs-baseline` or
+`matmul-batched-rhs-baseline`.
+
+A measured 2D MatMulV3 can use the existing pinned MatMulV3 source adapter.
+Other measured operators currently keep the baseline with
+`tuning_supported=false`; the suite records `kind=tuning_unavailable` and skips
+candidate stages for that case. A successful baseline is not a tuning success.
+No BatchMatMulV2 tiling adapter is implemented yet. Inspect `inspection_argv`
+in `routing.json` to diagnose that baseline's installed V2 source and compilation
+branch before implementing its parameter controls. Matching Op Type alone does
+not establish identical internal kernels or source revisions.
+
+`profile_inventory.json` remains available when automatic discovery fails.
+Ambiguous MatMul nodes, duplicate exports or an incorrect sample count are errors;
+no fallback selects the fastest row or adds unrelated task times together.

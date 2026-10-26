@@ -22,6 +22,8 @@ def load_config(path):
         implementation = c.get("implementation", {"kind": "bundled"})
         if not isinstance(implementation, dict) or implementation.get("kind") not in ("bundled", KIND, BASELINE_ONLY):
             raise TuningError("implementation.kind must be bundled, cann_matmul_v3 or baseline_only")
+        if type(implementation.get("require_same_operator", True)) is not bool:
+            raise TuningError("implementation.require_same_operator must be a boolean")
         baseline = baseline_only(c)
         if baseline and (c["backend"] != "ascend" or op["kind"] != "matmul"):
             raise TuningError("baseline_only requires Ascend MatMul")

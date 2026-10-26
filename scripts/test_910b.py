@@ -21,6 +21,7 @@ from paretopilot.config import load_config
 from paretopilot.official import enabled as official_enabled, DEFAULT_PARAMS, COMMIT
 from paretopilot.search import confirmation_roles
 from paretopilot.workload import baseline_only, shapes
+from paretopilot.routing import same_operator
 from paretopilot.util import TuningError, read_json, write_json
 
 
@@ -256,6 +257,7 @@ def verify_baseline_result(directory):
             or not result.get("roofline") or not (directory/"report.html").is_file()):
         raise TuningError(f"{directory.name}: invalid real baseline or missing shape/sample evidence")
     return {"status": "passed", "kind": "baseline_only", "tuning_supported": False,
+            "operator_identity": result.get("operator_identity", {}),
             "selected": "baseline", "input_shapes": inputs, "output_shape": output,
             "task_metrics": {"baseline_us": result["duration_us"]},
             "roofline": result["roofline"], "report": str(directory/"report.html")}
@@ -270,6 +272,11 @@ def verify_result(directory, smoke):
     history = result.get("history", [])
     confirmation = result.get("confirmation", {}).get("trials", [])
     config = read_json(directory/"manifest.json")["config"]
+    if result.get("routing", {}).get("tuning_supported") is False:
+        verified = verify_baseline_result(directory)
+        verified.update(kind="tuning_unavailable", reason=result["routing"]["reason"],
+                        operator_identity=result["routing"]["operator_identity"])
+        return verified
     rounds = config["measurement"]["confirmation_rounds"]
     roles = [role for i in range(rounds) for role in confirmation_roles(config, i)]
     expected = len(roles)
@@ -295,7 +302,14 @@ def verify_result(directory, smoke):
 def execute_suite(session, args, python, configs):
     cli = [python, "-m", "paretopilot"]
     kinds = [name for name, _ in workload_cases(args)]
-    session.run("doctor", cli+["doctor", "--config", str(configs[kinds[-1]]), "--output", str(session.root/"environment.json")])
+    doctor_config = configs[kinds[-1]]
+    preflight = read_json(doctor_config)
+    if same_operator(preflight):
+        preflight["implementation"] = {"kind": "baseline_only"}
+        preflight["space"] = {}
+        doctor_config = session.root/"config/preflight.json"
+        write_json(doctor_config, preflight)
+    session.run("doctor", cli+["doctor", "--config", str(doctor_config), "--output", str(session.root/"environment.json")])
     # Required imports prevent optional dependency tests from silently skipping.
     session.run("python-dependencies", [python, "-c", "import acl,numpy,torch,onnx; print('PyACL:',acl.__file__); print('numpy/torch/onnx:',numpy.__version__,torch.__version__,onnx.__version__)"])
     session.run("python-packages", [python, "-c", "from importlib.metadata import distributions; print('\\n'.join(sorted(d.metadata['Name']+'=='+d.version for d in distributions() if d.metadata['Name'])))"])
@@ -304,18 +318,25 @@ def execute_suite(session, args, python, configs):
     session.run("unit-tests", [python, "-m", "unittest", "discover", "-s", "tests", "-v"])
     for kind in operator_kinds(args):
         session.run("simulation-"+kind, cli+["run", "--config", str(ROOT/f"examples/simulation_{kind}.json"), "--output", str(session.root/("simulation-"+kind))])
+    unavailable = set()
     for kind in kinds:
         session.run(kind+"-baseline", cli+["baseline", "--config", str(configs[kind]), "--output", str(session.root/(kind+"-baseline"))])
-        if baseline_only(read_json(configs[kind])):
+        routing_path = session.root/(kind+"-baseline")/"routing.json"
+        routing = read_json(routing_path) if routing_path.is_file() else {}
+        if baseline_only(read_json(configs[kind])) or routing.get("tuning_supported") is False:
             session.data["current_check"] = "verify-"+kind+"-baseline"
             session.save()
             session.data["results"][kind+"-baseline"] = verify_baseline_result(session.root/(kind+"-baseline"))
+            if routing.get("tuning_supported") is False:
+                unavailable.add(kind)
+                session.data["results"][kind+"-baseline"].update(
+                    kind="tuning_unavailable", reason=routing["reason"], operator_identity=routing["operator_identity"])
             session.data.pop("current_check", None)
             session.save()
     phases = ("smoke", "full") if args.scope == "full" else ("smoke",)
     for phase in phases:
         for kind in kinds:
-            if baseline_only(read_json(configs[kind])):
+            if baseline_only(read_json(configs[kind])) or kind in unavailable:
                 continue
             name = kind+"-"+phase
             directory = session.root/name
@@ -324,6 +345,8 @@ def execute_suite(session, args, python, configs):
             session.data["current_check"] = "verify-"+name
             session.save()
             session.data["results"][name] = verify_result(directory, phase == "smoke")
+            if session.data["results"][name].get("kind") == "tuning_unavailable":
+                unavailable.add(kind)
             session.data.pop("current_check", None)
             session.save()
 
@@ -371,7 +394,7 @@ def main(argv=None):
         configs = prepare_configs(args, root)
         selected_configs = [read_json(configs[name]) for name, _ in workload_cases(args)]
         commands = {c["ascend"].get(tool, tool) for c in selected_configs for tool in ("atc", "msprof")}
-        if any(not baseline_only(c) for c in selected_configs):
+        if any(not baseline_only(c) and not same_operator(c) for c in selected_configs):
             commands.update(("cmake", "g++", "make"))
         commands.update(c["ascend"].get("msopgen", "msopgen") for c in selected_configs
                         if not official_enabled(c) and not baseline_only(c))

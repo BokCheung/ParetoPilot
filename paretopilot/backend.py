@@ -6,7 +6,8 @@ import subprocess
 import sys
 from .build import build_candidate, op_names
 from .official import enabled as official_enabled, read_effective_tiling
-from .profiling import read_profile
+from .profiling import read_profile, discover_matmul, inspect_profiles
+from .routing import same_operator
 from .roofline import analyze
 from .util import TuningError, digest, file_hash, read_json, run_command, write_json
 
@@ -67,7 +68,19 @@ class AscendBackend:
         if not paths:
             raise TuningError("msprof produced no op_summary CSV; inspect profiler_export.log")
         m = self.c["measurement"]
-        metrics = read_profile(paths, m["selectors"][role], m["repeats"], m.get("duration_column", "Task Duration(us)"), m.get("traffic_column"))
+        write_json(directory/"profile_inventory.json", inspect_profiles(paths))
+        if role == "baseline" and same_operator(self.c):
+            metrics = discover_matmul(paths, m["repeats"], m.get("duration_column", "Task Duration(us)"), m.get("traffic_column"))
+            identity = metrics["operator_identity"]
+            if getattr(self, "baseline_identity", identity).get("Op Type") != identity.get("Op Type"):
+                raise TuningError("Baseline operator changed during confirmation")
+            self.baseline_identity = identity
+        else:
+            metrics = read_profile(paths, m["selectors"][role], m["repeats"], m.get("duration_column", "Task Duration(us)"), m.get("traffic_column"))
+            if same_operator(self.c) and role != "baseline":
+                expected = getattr(self, "baseline_identity", {}).get("Op Type")
+                if not expected or metrics["operator_identity"].get("Op Type") != expected:
+                    raise TuningError("Candidate profiling operator differs from the measured baseline")
         return {"status": "ok", "mode": "ascend", **metrics, "correctness": runtime["correctness"], "om_sha256": om_hash,
                 "input_shapes": [t["shape"] for t in metadata["inputs"]], "output_shape": metadata["output_shape"],
                 "om_path": str(om), "source_dir": build["source_dir"] if build else None, "selection": build}

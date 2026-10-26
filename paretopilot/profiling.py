@@ -41,6 +41,31 @@ def inspect_profiles(paths):
     return result
 
 
+MATMUL_TYPES = {"MatMul", "MatMulV2", "MatMulV3", "BatchMatMul", "BatchMatMulV2", "BatchMatMulV3"}
+
+
+def discover_matmul(paths, repeats, duration_column="Task Duration(us)", traffic_column=None):
+    """Discover a single lowered MatMul task, never guess by speed or row order."""
+    inventory = inspect_profiles(paths)
+    tasks = {}
+    for item in inventory:
+        if not {"Op Name", "Op Type"}.issubset({canonical_column(k) for k in item["columns"]}):
+            raise TuningError("MatMul discovery requires Op Name and Op Type; inspect profile_inventory.json")
+        for task in item["tasks"]:
+            if task.get("Op Type") in MATMUL_TYPES:
+                identity = tuple((k, task[k]) for k in IDENTITY_COLUMNS if k in task)
+                tasks[identity] = tasks.get(identity, 0)+task["samples"]
+    if len(tasks) != 1:
+        raise TuningError(f"Expected one identifiable lowered MatMul task; found {len(tasks)}. Inspect profile_inventory.json; no operator was guessed.")
+    identity, count = next(iter(tasks.items()))
+    if count != repeats:
+        raise TuningError(f"Discovered MatMul has {count} samples, expected {repeats}; inspect profile_inventory.json")
+    selector = dict(identity)
+    metrics = read_profile(paths, selector, repeats, duration_column, traffic_column)
+    metrics["operator_identity"] = selector
+    return metrics
+
+
 def read_profile(paths, selector, repeats, duration_column="Task Duration(us)", traffic_column=None):
     normalized_selector = {canonical_column(k): v for k, v in selector.items()}
     if len(normalized_selector) != len(selector):
@@ -70,5 +95,7 @@ def read_profile(paths, selector, repeats, duration_column="Task Duration(us)", 
         traffic = statistics.median(number(float(r[traffic_column]), "measured bytes", 1e-15) for r in records) if traffic_column else None
     except (TypeError, ValueError, KeyError) as exc:
         raise TuningError(f"Invalid profiling value: {exc}") from exc
+    identity = {k: records[0][k] for k in IDENTITY_COLUMNS if k in records[0]}
     return {"duration_us": statistics.median(values), "samples_us": values, "measured_bytes": traffic,
+            "operator_identity": identity,
             "metric": "OM target-op Task Duration(us) median", "selector": selector, "csv_files": list(map(str, paths))}
