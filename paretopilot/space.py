@@ -1,8 +1,11 @@
 import itertools
+from .workload import baseline_only
 from .official import enabled as official_enabled
 
 
 def legal(p, config):
+    if baseline_only(config):
+        return False
     hw, op = config["hardware"], config["operator"]
     if official_enabled(config):
         return (set(p) == {"core_limit", "tiling_policy"} and 0 <= p["core_limit"] <= min(24, hw["max_blocks"])

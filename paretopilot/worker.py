@@ -5,6 +5,7 @@ import inspect
 from pathlib import Path
 import sys
 from .util import TuningError, file_hash, read_json, write_json
+from .workload import shapes as workload_shapes
 
 
 def export_case(config, directory):
@@ -14,8 +15,7 @@ def export_case(config, directory):
     directory = Path(directory)
     op = config["operator"]
     dtype = getattr(torch, op["dtype"])
-    shapes = [[op["m"], op["k"]], [op["k"], op["n"]]] if op["kind"] == "matmul" else [[op["numel"]]]*2
-    expected_output = [op["m"], op["n"]] if op["kind"] == "matmul" else [op["numel"]]
+    shapes, expected_output = workload_shapes(op)
     if config["baseline"]["kind"] == "python":
         spec = importlib.util.spec_from_file_location("user_baseline", config["baseline"]["path"])
         module = importlib.util.module_from_spec(spec)

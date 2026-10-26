@@ -63,6 +63,30 @@ python -m paretopilot run --config examples/ascend910b_matmul.json --output runs
 
 官方 MatMul 示例 SoC 为 `Ascend910B2`；一键脚本统一用 `--soc` 覆盖所选算子的配置。Roofline 的算力、带宽只是示例假设，需要替换成该芯片、dtype、稠密口径下的数值。配置通过不代表硬件参数已验证。
 
+## 三维 MatMul 基线
+
+现有二维官方源码调优用例保持不变，另提供两种 FP16 三维基线：
+
+| 用例 | 输入 A | 输入 B | 输出 | 配置 |
+| --- | --- | --- | --- | --- |
+| 共享权重投影 | `[32,100,128]` | `[128,256]` | `[32,100,256]` | `examples/ascend910b_matmul_shared_rhs.json` |
+| 每个请求独立的候选打分 | `[32,1,128]` | `[32,128,100]` | `[32,1,100]` | `examples/ascend910b_matmul_batched_rhs.json` |
+
+在 910B2 上同时运行这两个基线：
+
+```bash
+python3 scripts/test_910b.py \
+  --cann-path /usr/local/Ascend/cann-8.5.0 \
+  --soc Ascend910B2 --device 0 --deps check \
+  --operator matmul --matmul-case 3d --scope smoke --timeout 3600
+```
+
+`--matmul-case` 默认 `2d`，可选 `shared_rhs`、`batched_rhs`、`3d`（两个三维用例）或 `all`（二维加两个三维用例）。三维阶段使用已安装 CANN 的内置实现，完成 ONNX 导出、ATC 编译、真实输出精度检查、预热后 20 次目标任务采样和 Roofline 分析。`test-summary.json` 中结果为 `matmul-shared-rhs-baseline`、`matmul-batched-rhs-baseline`，各阶段目录含 `baseline_summary.json`、`report.html` 和 `roofline.svg`。
+
+这两个配置标为 `implementation.kind=baseline_only`，参数域为空。当前候选适配器只支持二维，因此三维阶段不会调用源码候选或 Agent，也不报告调优收益；`--scope full` 对它们仍只测基线。Roofline 和 Dummy Agent 接口继续保留，后续接入三维候选时再扩展参数域。Roofline 的共享权重流量只计一份，独立批次权重计 batch 份；这是形状下界，不代表实测 DRAM 流量。
+
+配置中的 `operator.batch` 与 `operator.batch_mode` 必须同时设置，模式为 `shared_rhs` 或 `batched_rhs`。即使 batch 为 1，也保留三维输入。默认 profiling 选择器为 `BatchMatMulV2`，会严格要求恰好 20 个目标样本；ATC 实际降图若选择其他算子，先用 `inspect-profile` 确认表中算子名与计数，再调整对应基线选择器，不能把其他任务混入耗时。
+
 ## 自定义基线与未来 Agent
 
 - 基线：`examples/baseline_matmul.py` 提供 `build_case(operator, seed)`。输入/输出须保持上述固定语义，候选模板不会自动翻译任意 Python 算子。

@@ -191,3 +191,38 @@ python3 scripts/test_910b.py --cann-path /usr/local/Ascend/cann-8.5.0 --soc Asce
 | 汇总 | trial.json | 名称歧义、数量不符、非有限耗时 |
 
 本地验证不包含昇腾编译、实际 OPP 装载、设备正确性和加速收益。保留首次真机 smoke 的完整目录，可直接定位失败阶段，不需要 Agent 服务。
+
+
+## 3D MatMul baseline cases
+
+Keep the existing 2D tuning pipeline and run both 3D baseline cases with:
+
+```bash
+cd /home/ma-user/work/ParetoPilot
+git pull --ff-only origin main
+/home/ma-user/anaconda3/envs/PyTorch-2.6.0/bin/python3 scripts/test_910b.py \
+  --cann-path /usr/local/Ascend/cann-8.5.0 \
+  --soc Ascend910B2 --device 0 --deps check \
+  --operator matmul --matmul-case 3d --scope smoke --timeout 3600
+```
+
+Use `--matmul-case all` to include the existing 2D source tuning smoke as well.
+Use `shared_rhs` or `batched_rhs` to select one 3D case. The default remains `2d`.
+Both 3D cases use the installed stock implementation, not the 2D MatMulV3 candidate.
+Their results have `kind=baseline_only` and `tuning_supported=false`; no candidate speedup is claimed.
+`--scope full` only expands supported tuning cases and does not enable 3D candidate tuning.
+No installation runs with `--deps check`. Run as the environment's normal user, without sudo.
+
+The baseline stage directories are `matmul-shared-rhs-baseline` and
+`matmul-batched-rhs-baseline` under the generated `runs/910b-*` directory.
+Read `baseline_summary.json` for `duration_us`, `samples_us`, actual input/output
+shapes and Roofline, or open `report.html`. `test-summary.json` collects both results.
+Timing is the median target task duration in microseconds; stage seconds include
+compilation and profiling overhead. The generated `case/case.json` records the
+fixed shapes passed to ATC and checked against the compiled OM by the runtime.
+
+The default exact operator selector is `BatchMatMulV2`. If exported profiling
+uses another operator after graph lowering, inspect that stage's `op_summary*.csv`
+with `python3 -m paretopilot inspect-profile /path/to/op_summary.csv` and update
+`measurement.selectors.baseline` in the relevant example configuration. Do not
+combine different tasks to satisfy the required sample count.

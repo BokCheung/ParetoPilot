@@ -2,6 +2,7 @@ import math
 from pathlib import Path
 from .util import TuningError, number, read_json
 from .official import KIND, enabled as official_enabled
+from .workload import BASELINE_ONLY, baseline_only
 
 
 def load_config(path):
@@ -19,8 +20,19 @@ def load_config(path):
         if op["kind"] not in ("matmul", "add") or op["dtype"] not in ("float16", "float32"):
             raise TuningError("V1 supports matmul/add with float16/float32")
         implementation = c.get("implementation", {"kind": "bundled"})
-        if not isinstance(implementation, dict) or implementation.get("kind") not in ("bundled", KIND):
-            raise TuningError("implementation.kind must be bundled or cann_matmul_v3")
+        if not isinstance(implementation, dict) or implementation.get("kind") not in ("bundled", KIND, BASELINE_ONLY):
+            raise TuningError("implementation.kind must be bundled, cann_matmul_v3 or baseline_only")
+        baseline = baseline_only(c)
+        if baseline and (c["backend"] != "ascend" or op["kind"] != "matmul"):
+            raise TuningError("baseline_only requires Ascend MatMul")
+        if "batch" in op or "batch_mode" in op:
+            if op["kind"] != "matmul" or "batch" not in op or op.get("batch_mode") not in ("shared_rhs", "batched_rhs"):
+                raise TuningError("3D MatMul requires batch and batch_mode=shared_rhs or batched_rhs")
+            number(op["batch"], "batch", 1, True)
+            if op["batch"] > 2147483647:
+                raise TuningError("batch must fit int32")
+            if not baseline:
+                raise TuningError("3D MatMul currently requires baseline_only; candidate adapters support only 2D")
         official = official_enabled(c)
         if official and (c["backend"] != "ascend" or op["kind"] != "matmul" or op["dtype"] != "float16"):
             raise TuningError("Official MatMul currently requires Ascend FP16 MatMul")
@@ -42,6 +54,8 @@ def load_config(path):
         required = {"tile_m", "tile_n", "tile_k", "buffers", "block_dim"} if op["kind"] == "matmul" else {"tile_elems", "buffers", "block_dim"}
         if official:
             required = {"core_limit", "tiling_policy"}
+        if baseline:
+            required = set()
         if set(c["space"]) != required:
             raise TuningError(f"Template requires parameters {sorted(required)}")
         if official and (any(v > min(24, c["hardware"]["max_blocks"]) for v in c["space"]["core_limit"])
@@ -62,7 +76,7 @@ def load_config(path):
         for key in ("rtol", "atol"):
             number(m[key], key)
         number(m["timeout_s"], "timeout_s", 1)
-        for role in (("baseline", "source_baseline", "candidate") if official else ("baseline", "candidate")):
+        for role in (("baseline",) if baseline else ("baseline", "source_baseline", "candidate") if official else ("baseline", "candidate")):
             selector = m["selectors"][role]
             if not isinstance(selector, dict) or not selector or not all(isinstance(k, str) and isinstance(v, str) and v for k, v in selector.items()):
                 raise TuningError("Profiling selectors must contain exact nonempty column/value pairs")
@@ -101,7 +115,7 @@ def load_config(path):
                 raise TuningError("MatMul dimensions must fit int32")
             if op["dtype"] != "float16":
                 raise TuningError("Bundled 910B kernels currently support float16")
-            if op["kind"] == "matmul" and not official and (any(op[k] % 16 for k in ("m", "n", "k")) or c["space"]["buffers"] != [1]):
+            if op["kind"] == "matmul" and not official and not baseline and (any(op[k] % 16 for k in ("m", "n", "k")) or c["space"]["buffers"] != [1]):
                 raise TuningError("Bundled MatMul requires M/N/K multiples of 16 and buffers=[1] (CANN owns internal buffers)")
             if not a["soc_version"].startswith("Ascend910B") or not a["cann_version"].startswith("8.5.0"):
                 raise TuningError("Bundled kernels target Ascend910B and CANN 8.5.0")

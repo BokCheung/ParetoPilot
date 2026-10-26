@@ -1,6 +1,22 @@
 import csv
 import html
 import math
+from .workload import shapes
+
+
+def write_baseline_report(root, config, baseline):
+    inputs, output = shapes(config["operator"])
+    title = f"MatMul baseline: {inputs[0]} x {inputs[1]} -> {output}" if config["operator"]["kind"] == "matmul" else "Add baseline"
+    duration = baseline["duration_us"]
+    note = "Baseline measurement only. Candidate tuning and speedup were not evaluated."
+    roofline_note = "Roofline uses configured hardware assumptions and shape minimum traffic unless measured traffic is supplied. Cache reuse and compiler lowering can change actual traffic."
+    svg = roofline_svg(config, baseline, [])
+    (root/"roofline.svg").write_text(svg, encoding="utf-8")
+    (root/"report.md").write_text(f"# {title}\n\n{note}\n\nTarget task median: {duration:.4f} us.\n\n{roofline_note}\n", encoding="utf-8")
+    (root/"report.html").write_text(
+        f'<!doctype html><html lang="en"><meta charset="utf-8"><title>{html.escape(title)}</title>'
+        f'<body><h1>{html.escape(title)}</h1><p>{note}</p><p>Target task median: {duration:.4f} us.</p>'
+        f'<p>{roofline_note}</p>{svg}</body></html>', encoding="utf-8")
 
 
 def roofline_svg(config, baseline, trials):

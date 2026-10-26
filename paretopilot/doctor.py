@@ -7,6 +7,7 @@ import subprocess
 import sys
 from .official import enabled as official_enabled, verify_bundle, legacy_library
 from .util import TuningError
+from .workload import baseline_only
 
 
 def inspect_environment(config):
@@ -19,7 +20,9 @@ def inspect_environment(config):
     add("platform", sys.platform.startswith("linux"), platform.platform())
     a = config["ascend"]
     commands = [a.get("atc", "atc"), a.get("msprof", "msprof"), "bash", "cmake", "g++", "make"]
-    if not official_enabled(config):
+    if baseline_only(config):
+        commands = commands[:3]
+    elif not official_enabled(config):
         commands.append(a.get("msopgen", "msopgen"))
     else:
         try:

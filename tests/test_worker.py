@@ -109,6 +109,29 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(acl.events[-1],"finalize")
         self.assertTrue(read_json(self.root/"runtime.json")["correctness"]["passed"])
 
+    def test_3d_shapes_roundtrip_through_acl_runner(self):
+        import numpy as np
+        for mode in ("shared_rhs", "batched_rhs"):
+            with self.subTest(mode=mode):
+                self.c = load_config(ROOT/f"examples/ascend910b_matmul_{mode}.json")
+                self.c["measurement"].update(warmup=1, repeats=3)
+                self.request["config"] = self.c
+                directory = self.root/mode
+                directory.mkdir()
+                self.request["directory"] = str(directory)
+                a = np.arange(24, dtype=np.float16).reshape(2, 3, 4)/24
+                b = np.ones((4, 5) if mode == "shared_rhs" else (2, 4, 5), dtype=np.float16)
+                reference = np.matmul(a, b)
+                for i, array in enumerate((a, b)):
+                    np.save(self.root/f"input_{i}.npy", array)
+                np.save(self.root/"reference.npy", reference)
+                acl = FakeACL([a, b], reference)
+                with patch.dict(sys.modules, {"acl": acl}):
+                    execute_om(self.request)
+                self.assertEqual(acl.events.count("sample"), 3)
+                self.assertEqual(acl.memory, {})
+                self.assertTrue(read_json(directory/"runtime.json")["correctness"]["passed"])
+
     def test_bad_correctness_prevents_profiling_and_cleans_up(self):
         acl = FakeACL(self.arrays,self.ref,wrong=True)
         with patch.dict(sys.modules,{"acl":acl}),self.assertRaises(TuningError):
@@ -128,6 +151,27 @@ class WorkerTests(unittest.TestCase):
 
 @unittest.skipUnless(HAS_EXPORT,"optional torch/onnx/numpy not installed")
 class ExportTests(unittest.TestCase):
+    def test_3d_export_keeps_shared_and_batched_rhs_semantics(self):
+        import onnx
+        import numpy as np
+        with tempfile.TemporaryDirectory() as temp:
+            for mode in ("shared_rhs", "batched_rhs"):
+                c = load_config(ROOT/f"examples/ascend910b_matmul_{mode}.json")
+                c["operator"].update(batch=2, m=3, k=4, n=5)
+                target = Path(temp)/mode
+                target.mkdir()
+                export_case(c, target)
+                inputs = [np.load(target/f"input_{i}.npy") for i in range(2)]
+                expected = np.matmul(*inputs)
+                np.testing.assert_allclose(np.load(target/"reference.npy"), expected, rtol=0.002, atol=0.002)
+                model = onnx.load(str(target/"baseline.onnx"))
+                self.assertEqual([n.op_type for n in model.graph.node], ["MatMul"])
+                dims = lambda value: [d.dim_value for d in value.type.tensor_type.shape.dim]
+                self.assertEqual([dims(v) for v in model.graph.input], [list(a.shape) for a in inputs])
+                self.assertEqual(dims(model.graph.output[0]), [2, 3, 5])
+                if mode == "batched_rhs":
+                    self.assertFalse(np.array_equal(inputs[1][0], inputs[1][1]))
+
     def test_real_pytorch_export_for_builtin_and_python_baseline(self):
         import onnx
         import numpy as np

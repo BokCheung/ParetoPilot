@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 from paretopilot.config import load_config
 from paretopilot.official import enabled as official_enabled, DEFAULT_PARAMS, COMMIT
 from paretopilot.search import confirmation_roles
+from paretopilot.workload import baseline_only, shapes
 from paretopilot.util import TuningError, read_json, write_json
 
 
@@ -44,6 +45,7 @@ def parser():
     p.add_argument("--soc", required=True, help="Exact target SoC, e.g. Ascend910B1; check npu-smi")
     p.add_argument("--device", type=nonnegative, default=0)
     p.add_argument("--operator", choices=("all", "matmul", "add"), default="all", help="Select hardware acceptance stages")
+    p.add_argument("--matmul-case", choices=("2d", "shared_rhs", "batched_rhs", "3d", "all"), default="2d", help="3D cases are baseline benchmarks only; all retains the 2D tuning stages")
     p.add_argument("--scope", choices=("smoke", "full"), default="full", help="Both run preflight, unit tests, simulation, baselines and smoke; full also searches both operators")
     p.add_argument("--deps", choices=("install", "offline", "check"), default="install", help="install/offline use an isolated venv; check uses this interpreter without installing dependencies")
     p.add_argument("--wheelhouse", type=Path, help="Local wheels for --deps offline")
@@ -106,7 +108,7 @@ class Session:
     def __init__(self, root, args):
         self.root, self.env = root, os.environ.copy()
         self.data = {"status": "running", "started_utc": datetime.now(timezone.utc).isoformat(),
-                     "scope": args.scope, "soc": args.soc, "device": args.device, "stages": [], "results": {}}
+                     "scope": args.scope, "matmul_case": args.matmul_case, "soc": args.soc, "device": args.device, "stages": [], "results": {}}
         self.save()
 
     def save(self):
@@ -196,13 +198,19 @@ def prepare_python(session, args):
 
 def prepare_configs(args, output):
     configs = {}
-    for kind in operator_kinds(args):
-        config = load_config(args.config_dir/f"ascend910b_{kind}.json")
-        if config["backend"] != "ascend" or config["operator"]["kind"] != kind:
+    for kind, filename in workload_cases(args):
+        config = load_config(args.config_dir/filename)
+        if config["backend"] != "ascend" or config["operator"]["kind"] != kind.split("-")[0]:
             raise TuningError(f"{kind} input config must describe the matching Ascend operator")
         config["ascend"].update(soc_version=args.soc, device=args.device)
         config["agent"] = {"kind": "dummy"}
         config["measurement"]["timeout_s"] = args.timeout
+        if baseline_only(config):
+            path = output/"config"/(kind+".json")
+            write_json(path, config)
+            load_config(path)
+            configs[kind] = path
+            continue
         smoke = deepcopy(config)
         smoke["space"] = {name: [values[0]] for name, values in config["space"].items()}
         if official_enabled(config):
@@ -219,6 +227,38 @@ def prepare_configs(args, output):
 
 def operator_kinds(args):
     return ("add", "matmul") if args.operator == "all" else (args.operator,)
+
+
+def workload_cases(args):
+    cases = []
+    for kind in operator_kinds(args):
+        if kind == "add":
+            cases.append((kind, "ascend910b_add.json"))
+            continue
+        if args.matmul_case in ("2d", "all"):
+            cases.append((kind, "ascend910b_matmul.json"))
+        for mode in ("shared_rhs", "batched_rhs"):
+            if args.matmul_case in (mode, "3d", "all"):
+                cases.append(("matmul-"+mode.replace("_", "-"), "ascend910b_matmul_"+mode+".json"))
+    return cases
+
+
+def verify_baseline_result(directory):
+    result = read_json(directory/"baseline_summary.json")
+    config = read_json(directory/"manifest.json")["config"]
+    inputs, output = shapes(config["operator"])
+    if (result.get("status") != "ok" or result.get("mode") != "ascend"
+            or result.get("correctness", {}).get("passed") is not True
+            or result.get("correctness", {}).get("simulated", False)
+            or result.get("input_shapes") != inputs or result.get("output_shape") != output
+            or len(result.get("samples_us", [])) != config["measurement"]["repeats"]
+            or not result.get("om_sha256") or not result.get("csv_files")
+            or not result.get("roofline") or not (directory/"report.html").is_file()):
+        raise TuningError(f"{directory.name}: invalid real baseline or missing shape/sample evidence")
+    return {"status": "passed", "kind": "baseline_only", "tuning_supported": False,
+            "selected": "baseline", "input_shapes": inputs, "output_shape": output,
+            "task_metrics": {"baseline_us": result["duration_us"]},
+            "roofline": result["roofline"], "report": str(directory/"report.html")}
 
 
 def verify_result(directory, smoke):
@@ -254,7 +294,7 @@ def verify_result(directory, smoke):
 
 def execute_suite(session, args, python, configs):
     cli = [python, "-m", "paretopilot"]
-    kinds = operator_kinds(args)
+    kinds = [name for name, _ in workload_cases(args)]
     session.run("doctor", cli+["doctor", "--config", str(configs[kinds[-1]]), "--output", str(session.root/"environment.json")])
     # Required imports prevent optional dependency tests from silently skipping.
     session.run("python-dependencies", [python, "-c", "import acl,numpy,torch,onnx; print('PyACL:',acl.__file__); print('numpy/torch/onnx:',numpy.__version__,torch.__version__,onnx.__version__)"])
@@ -262,13 +302,21 @@ def execute_suite(session, args, python, configs):
     for kind in kinds:
         session.run("validate-"+kind, cli+["validate", "--config", str(configs[kind])])
     session.run("unit-tests", [python, "-m", "unittest", "discover", "-s", "tests", "-v"])
-    for kind in kinds:
+    for kind in operator_kinds(args):
         session.run("simulation-"+kind, cli+["run", "--config", str(ROOT/f"examples/simulation_{kind}.json"), "--output", str(session.root/("simulation-"+kind))])
     for kind in kinds:
         session.run(kind+"-baseline", cli+["baseline", "--config", str(configs[kind]), "--output", str(session.root/(kind+"-baseline"))])
+        if baseline_only(read_json(configs[kind])):
+            session.data["current_check"] = "verify-"+kind+"-baseline"
+            session.save()
+            session.data["results"][kind+"-baseline"] = verify_baseline_result(session.root/(kind+"-baseline"))
+            session.data.pop("current_check", None)
+            session.save()
     phases = ("smoke", "full") if args.scope == "full" else ("smoke",)
     for phase in phases:
         for kind in kinds:
+            if baseline_only(read_json(configs[kind])):
+                continue
             name = kind+"-"+phase
             directory = session.root/name
             command = cli+["run", "--config", str(configs[name if phase == "smoke" else kind]), "--output", str(directory)]
@@ -300,6 +348,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     if not re.fullmatch(r"Ascend910B[A-Za-z0-9]*", args.soc):
         p.error("--soc must be the exact Ascend910B variant")
+    if args.operator == "add" and args.matmul_case != "2d":
+        p.error("--matmul-case requires --operator matmul or all")
     if args.deps == "offline" and (args.wheelhouse is None or not args.wheelhouse.is_dir()):
         p.error("--deps offline requires an existing --wheelhouse directory")
     if args.deps != "offline" and args.wheelhouse is not None:
@@ -319,9 +369,13 @@ def main(argv=None):
         write_json(root/"cann.json", {"root": str(cann), "env_script": str(script), "version_records": versions})
         session.env = source_environment(cann, script, root/"cann-env.log")
         configs = prepare_configs(args, root)
-        commands = {read_json(configs[kind])["ascend"].get(tool, tool) for kind in operator_kinds(args) for tool in ("atc", "msprof")}
-        commands.update(read_json(configs[kind])["ascend"].get("msopgen", "msopgen") for kind in operator_kinds(args) if not official_enabled(read_json(configs[kind])))
-        for name in sorted(commands | {"cmake", "g++", "make", "npu-smi"}):
+        selected_configs = [read_json(configs[name]) for name, _ in workload_cases(args)]
+        commands = {c["ascend"].get(tool, tool) for c in selected_configs for tool in ("atc", "msprof")}
+        if any(not baseline_only(c) for c in selected_configs):
+            commands.update(("cmake", "g++", "make"))
+        commands.update(c["ascend"].get("msopgen", "msopgen") for c in selected_configs
+                        if not official_enabled(c) and not baseline_only(c))
+        for name in sorted(commands | {"npu-smi"}):
             if not shutil.which(name, path=session.env.get("PATH")):
                 raise TuningError(f"Required executable missing: {name}; check CANN Toolkit/ops and build tools")
         session.run("npu-smi", ["npu-smi", "info"])

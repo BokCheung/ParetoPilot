@@ -6,7 +6,8 @@ import statistics
 from .agent import load_agent, validate_proposal
 from .backend import AscendBackend, SimulationBackend, evaluate
 from .doctor import inspect_environment
-from .report import write_report
+from .report import write_report, write_baseline_report
+from .workload import baseline_only as baseline_config
 from .space import enumerate_space, legal
 from .official import enabled as official_enabled, DEFAULT_PARAMS
 from .util import TuningError, digest, file_hash, tree_hash, write_json
@@ -78,11 +79,13 @@ def confirmation(config, winner, backend, root):
 
 
 def run(config, output, progress=None, baseline_only=False):
+    if baseline_config(config) and not baseline_only:
+        raise TuningError("baseline_only workload: use the baseline command; 3D candidate tuning is not supported")
     root = Path(output).resolve()
     if root.exists() and (not root.is_dir() or any(root.iterdir())):
         raise TuningError("Output directory must be empty; choose a new run directory")
     original_pool = enumerate_space(config)
-    if not original_pool:
+    if not original_pool and not baseline_config(config):
         raise TuningError("No legal template configurations")
     root.mkdir(parents=True, exist_ok=True)
     sources = Path(__file__).parent
@@ -105,7 +108,8 @@ def run(config, output, progress=None, baseline_only=False):
         raise TuningError(f"Baseline failed: {baseline['error']}")
     if baseline_only:
         write_json(root/"baseline_summary.json", baseline)
-        return {"mode": config["backend"], "baseline_us": baseline["duration_us"], "report": str(root/"baseline_summary.json")}
+        write_baseline_report(root, config, baseline)
+        return {"mode": config["backend"], "baseline_us": baseline["duration_us"], "report": str(root/"report.html")}
     source_baseline = None
     if official_enabled(config):
         source_baseline = evaluate(backend, config, DEFAULT_PARAMS.copy(), root/"source_baseline", "source_baseline")

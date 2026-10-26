@@ -69,6 +69,7 @@ class AscendBackend:
         m = self.c["measurement"]
         metrics = read_profile(paths, m["selectors"][role], m["repeats"], m.get("duration_column", "Task Duration(us)"), m.get("traffic_column"))
         return {"status": "ok", "mode": "ascend", **metrics, "correctness": runtime["correctness"], "om_sha256": om_hash,
+                "input_shapes": [t["shape"] for t in metadata["inputs"]], "output_shape": metadata["output_shape"],
                 "om_path": str(om), "source_dir": build["source_dir"] if build else None, "selection": build}
 
     def candidate_graph(self, path):

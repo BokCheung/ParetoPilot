@@ -11,6 +11,7 @@ from .roofline import analyze
 from .official import enabled as official_enabled, DEFAULT_PARAMS
 from .search import run
 from .space import enumerate_space
+from .workload import baseline_only
 from .util import TuningError, write_json
 
 
@@ -48,7 +49,7 @@ def main(argv=None):
             c = load_config(args.config)
             if args.command == "validate":
                 count = len(enumerate_space(c))
-                if not count:
+                if not count and not baseline_only(c):
                     raise TuningError("No legal template configurations")
                 result = {"valid": True, "backend": c["backend"], "legal_candidates": count, "agent": c["agent"]["kind"]}
             elif args.command == "doctor":
