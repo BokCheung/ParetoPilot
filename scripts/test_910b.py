@@ -48,12 +48,14 @@ def parser():
     p.add_argument("--operator", choices=("all", "matmul", "add"), default="all", help="Select hardware acceptance stages")
     p.add_argument("--matmul-implementation", choices=("batch-v3", "legacy"), default="batch-v3", help="Default: BatchMatMulV3 source baseline and Host tiling; legacy retains earlier MatMulV3/baseline-only cases")
     p.add_argument("--matmul-case", choices=("2d", "shared_rhs", "batched_rhs", "3d", "all"), default="2d", help="Choose 2D/3D workloads; batch-v3 tunes all cases, legacy 3D cases are baseline-only")
-    p.add_argument("--scope", choices=("smoke", "full"), default="full", help="Both run preflight, unit tests, simulation, baselines and smoke; full also searches both operators")
+    p.add_argument("--scope", choices=("smoke", "full"), default="full", help="Batch-v3 smoke checks source compile/correctness/profile only; full adds tests, references, search and confirmation")
     p.add_argument("--deps", choices=("install", "offline", "check"), default="install", help="install/offline use an isolated venv; check uses this interpreter without installing dependencies")
     p.add_argument("--wheelhouse", type=Path, help="Local wheels for --deps offline")
     p.add_argument("--venv", type=Path, default=ROOT/".venv-910b", help="Reusable venv for install/offline; must match this Python version")
     p.add_argument("--output", type=Path, help="New or empty directory; default creates runs/910b-<unique-id>")
     p.add_argument("--config-dir", type=Path, default=ROOT/"examples", help="Directory with ascend910b_add.json and ascend910b_matmul.json")
+    p.add_argument("--build-cache", type=Path, help="Persistent BatchMatMulV3 source package cache (default: project .cache/official-builds)")
+    p.add_argument("--no-build-cache", action="store_true", help="Rebuild the source package for each parameter set")
     p.add_argument("--timeout", type=positive, default=1800, help="Per compiler/ATC/runtime subprocess and doctor dependency-import timeout in seconds")
     return p
 
@@ -213,6 +215,10 @@ def prepare_configs(args, output):
             load_config(path)
             configs[kind] = path
             continue
+        if batch_enabled(config):
+            config["implementation"]["build_cache"] = not args.no_build_cache
+            if args.build_cache:
+                config["implementation"]["cache_dir"] = str(args.build_cache.expanduser().resolve())
         smoke = deepcopy(config)
         smoke["space"] = {name: [values[0]] for name, values in config["space"].items()}
         if official_enabled(config):
@@ -274,6 +280,23 @@ def verify_result(directory, smoke):
     history = result.get("history", [])
     confirmation = result.get("confirmation", {}).get("trials", [])
     config = read_json(directory/"manifest.json")["config"]
+    if result.get("scope") == "source_smoke":
+        trial = result.get("source_baseline", {})
+        selection = trial.get("selection") or {}
+        inputs, output = shapes(config["operator"])
+        if (not smoke or not batch_enabled(config) or result.get("mode") != "ascend"
+                or result.get("status") != "smoke_passed" or not valid(trial)
+                or trial.get("role") != "source_baseline" or trial.get("params") != default_params(config)
+                or trial.get("operator_identity", {}).get("Op Type") != "BatchMatMulV3"
+                or trial.get("input_shapes") != inputs or trial.get("output_shape") != output
+                or len(trial.get("samples_us", [])) != config["measurement"]["repeats"]
+                or selection.get("commit") != COMMIT or selection.get("operator") != "BatchMatMulV3"
+                or not selection.get("effective_tiling")):
+            raise TuningError(f"{directory.name}: invalid BatchMatMulV3 source smoke evidence")
+        return {"status": "passed", "scope": "source_smoke", "selected": "source_baseline",
+                "reason": result["reason"], "report": str(directory/"report.html"),
+                "task_metrics": {"source_baseline_us": trial["duration_us"], "tuning_accepted": False},
+                "cache_hit": selection.get("cache_hit", False)}
     if result.get("routing", {}).get("tuning_supported") is False:
         verified = verify_baseline_result(directory)
         verified.update(kind="tuning_unavailable", reason=result["routing"]["reason"],
@@ -325,14 +348,17 @@ def execute_suite(session, args, python, configs):
         doctor_config = session.root/"config/preflight.json"
         write_json(doctor_config, preflight)
     session.run("doctor", cli+["doctor", "--config", str(doctor_config), "--output", str(session.root/"environment.json")])
+    fast_smoke = args.scope == "smoke" and all(batch_enabled(read_json(configs[k])) for k in kinds)
     # Required imports prevent optional dependency tests from silently skipping.
-    session.run("python-dependencies", [python, "-c", "import acl,numpy,torch,onnx; print('PyACL:',acl.__file__); print('numpy/torch/onnx:',numpy.__version__,torch.__version__,onnx.__version__)"])
-    session.run("python-packages", [python, "-c", "from importlib.metadata import distributions; print('\\n'.join(sorted(d.metadata['Name']+'=='+d.version for d in distributions() if d.metadata['Name'])))"])
+    if not fast_smoke:
+        session.run("python-dependencies", [python, "-c", "import acl,numpy,torch,onnx; print('PyACL:',acl.__file__); print('numpy/torch/onnx:',numpy.__version__,torch.__version__,onnx.__version__)"])
+        session.run("python-packages", [python, "-c", "from importlib.metadata import distributions; print('\\n'.join(sorted(d.metadata['Name']+'=='+d.version for d in distributions() if d.metadata['Name'])))"])
     for kind in kinds:
         session.run("validate-"+kind, cli+["validate", "--config", str(configs[kind])])
-    session.run("unit-tests", [python, "-m", "unittest", "discover", "-s", "tests", "-v"])
-    for kind in operator_kinds(args):
-        session.run("simulation-"+kind, cli+["run", "--config", str(ROOT/f"examples/simulation_{kind}.json"), "--output", str(session.root/("simulation-"+kind))])
+    if not fast_smoke:
+        session.run("unit-tests", [python, "-m", "unittest", "discover", "-s", "tests", "-v"])
+        for kind in operator_kinds(args):
+            session.run("simulation-"+kind, cli+["run", "--config", str(ROOT/f"examples/simulation_{kind}.json"), "--output", str(session.root/("simulation-"+kind))])
     unavailable = set()
     for kind in kinds:
         if batch_enabled(read_json(configs[kind])):

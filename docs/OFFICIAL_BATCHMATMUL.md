@@ -63,8 +63,18 @@ Roofline → Dummy Agent 使用 V3 源码基线作为 context.baseline，另提�
 `stock_reference_us`、`stock_speedup` 表示 V2 参照与 V2 加速比。旧兼容字段 baseline_us/speedup
 仍表示 V2，source_baseline_us/source_speedup 表示 V3。
 
-相同参数的私有源码包在本次运行内可复用，使用前校验安装哈希；每次仍重新生成 OM、
-执行正确性检查、预热并采样。各 ATC 命令有独立工作/缓存目录，不能用此前 OM 计时冒充复测。
+默认使用跨运行不可变源码包缓存，位于项目 `.cache/official-builds`。所有参数和三个 shape 共用同一源码包，
+Host 从每次 ATC 进程的环境读取 core_limit、tiling_policy、batch_strategy 和请求签名；缺失或非法值拒绝执行。
+每次仍必须出现匹配的请求签名及实际 tiling 记录，不能仅以缓存命中证明参数已生效。
+缓存键包含源码包、适配代码、SoC、CANN 路径/版本记录、legacy 库和编译工具指纹，不包含 shape 或搜索参数。
+命中前验证 OPP 和 legacy 库哈希，文件锁防止并发重复构建，失败构建不发布。缓存目录和生成工程保留稳定绝对路径。
+修改 C++ 策略逻辑需要重新构建一次；调整现有参数不需要。
+
+`--build-cache /home/ma-user/work/paretopilot-cache` 指定持久目录，`--no-build-cache` 恢复每参数构建。
+JSON 配置对应 implementation.cache_dir、implementation.build_cache。日志打印 Source cache hit/miss，
+selection.cache_hit/cache_key 记录包的来源；同一运行中的相同参数复测另记录 reused_build.json。
+冷构建日志复制到试验的 cache-build-logs，原始工程在缓存目录。
+每次仍重新生成 OM、执行正确性检查、预热并采样，各 ATC 使用独立工作/缓存目录。
 
 ## 测试命令
 
@@ -78,7 +88,9 @@ git pull --ff-only origin main
   --scope smoke --timeout 3600
 ```
 
-smoke 检查二维、共享权重和独立 batch 三个用例，每个只评估默认参数，不能据此声明调优收益。
+smoke 检查二维、共享权重和独立 batch 三个用例，每个只执行一次默认 V3 的正确性与 profiling，保留 Roofline。
+该路径跳过 V2 参照、候选、确认轮次；仅选 MatMul 的 smoke 跳过单元测试和模拟闭环。不能据此声明调优收益。
+summary.scope=source_smoke，任务时间看 source_baseline.duration_us；没有候选数或加速比。
 改成 `--scope full` 执行完整搜索；仅测一个用例可用 `--matmul-case 2d/shared_rhs/batched_rhs`，
 `3d` 选择两个三维用例。无需 sudo、Agent 接口或安装新的依赖。
 

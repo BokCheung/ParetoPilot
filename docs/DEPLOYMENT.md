@@ -51,7 +51,8 @@ python3 scripts/test_910b.py --help
 | --matmul-implementation batch-v3 / legacy | 默认 batch-v3，完整 BatchMatMulV3 源码；legacy 保留旧路径 |
 | --matmul-case 2d / shared_rhs / batched_rhs / 3d / all | 默认 2d；all 覆盖二维及两个三维用例 |
 | --operator all / matmul / add | 默认 all；仅执行所选算子的硬件阶段 |
-| --scope full / smoke | 默认 full；smoke 完成全部前置验证后结束，不做完整搜索 |
+| --scope full / smoke | 默认 full；仅 MatMul batch-v3 smoke 运行一次 V3 正确性/profile，跳过单元/模拟测试及性能确认 |
+| --build-cache / --no-build-cache | 指定 BatchMatMulV3 持久源码包缓存目录 / 禁用缓存 |
 | --deps install / offline / check | 默认 install；install/offline 使用独立虚拟环境，check 使用启动脚本的解释器 |
 | --wheelhouse | offline 必填；不访问包索引，wheels 必须匹配 Linux 架构和 Python ABI |
 | --venv | 安装模式的虚拟环境目录，默认项目下 .venv-910b；已有环境须匹配当前 Python 小版本 |
@@ -126,7 +127,7 @@ python -m paretopilot run --config examples/ascend910b_batchmatmul.json --output
 
 doctor 只检查软件依赖、Toolkit 版本文件并展示 npu-smi；仍须核对实际 SoC。版本无法读取时，设置 ASCEND_HOME_PATH 指向已加载的 8.5.0 Toolkit 根目录，其中应存在 version.info 或架构目录下的 ascend_toolkit_install.info。真实运行也会执行并保存同一环境检查。
 
-smoke 只搜索一个候选、做两轮交错复测，成功后再扩预算。每次使用新输出目录。该阶段最坏需要 6 次构建/转换/运行（基线、搜索候选、两组复测），首次 ATC 编译可能较慢。
+BatchMatMulV3 smoke 每个 shape 只检查一次默认 V3，无 V2 参照、搜索或复测。Add/legacy smoke 仍搜索一个候选并做两轮交错复测。每次使用新输出目录，源码 OPP 缓存默认跨运行、shape 和参数复用；ATC 与设备检查仍实际执行。详见 [BatchMatMulV3](OFFICIAL_BATCHMATMUL.md)。
 
 所有候选失败时退出码为 2，详细错误在 trials/*/trial.json。没有足够收益而保留基线属于正常成功，退出码为 0。
 

@@ -51,6 +51,9 @@ class AscendBackend:
                 if batch_enabled(self.c):
                     self.source_builds[key] = deepcopy(build)
             env = environment(build["opp_path"])
+            if build.get("parameter_binding") == "atc_process_environment":
+                from .official_cache import runtime_environment
+                env.update(runtime_environment(params))
             self.candidate_graph(directory/"model.onnx")
         else:
             shutil.copyfile(self.case/"baseline.onnx", directory/"model.onnx")

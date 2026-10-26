@@ -43,7 +43,7 @@ git pull --ff-only origin main
 脚本自动加载 CANN 环境，`--deps check` 不安装依赖。无需 sudo。
 完整安装/离线安装选项见 [部署](docs/DEPLOYMENT.md)。
 
-smoke 使用默认 V3 参数，只验证流程与复测，不声明调优收益。
+smoke 每个 shape 只运行一次默认 V3 的正确性和 profiling 检查，保留 Roofline；不运行 V2、搜索或确认轮次，不声明调优收益。仅选 MatMul 的 smoke 也跳过单元测试和模拟闭环；full 保留完整验证与 Dummy Agent 搜索。
 full 的候选必须相对默认 V3 的收益超过最小阈值及观测噪声，并有稳定、不同的实际 tiling，才接受收益。
 即使候选仍慢于 V2，也会如实报告 V3 相对自身源码基线的收益；V2 不参与源码实现选择。
 没有收益时选择 `source_baseline`。
@@ -56,10 +56,12 @@ full 的候选必须相对默认 V3 的收益超过最小阈值及观测噪声�
 - `matmul-shared-rhs-smoke` / `matmul-shared-rhs-full`
 - `matmul-batched-rhs-smoke` / `matmul-batched-rhs-full`
 
-每个阶段有 `summary.json`、`report.html`、`report.md`、`roofline.svg` 和 `trials.csv`。
+每个阶段有 `summary.json`、`report.html`、`report.md` 和 `roofline.svg`；搜索阶段另有 `trials.csv`。
 `baseline/` 是 V2 性能参照；`source_baseline/` 是默认 V3 源码构建；`trials/` 是候选；
 `confirmation/` 是交错复测。各源构建保存源码/适配/安装哈希和实际 tiling。
-相同参数可复用经哈希验证的本次私有 OPP 构建，但每次仍重新 ATC 编译 OM、校验和采样，使用独立编译缓存。
+BatchMatMulV3 默认跨参数、shape 和运行复用经哈希校验的源码 OPP（项目 `.cache/official-builds`）。Host 在每次 ATC 进程读取参数，因此调整现有参数无需重新构建 OPP。源码、适配器、CANN 记录/依赖或编译工具变化会触发重建；修改 C++ 策略逻辑仍需构建一次。每次仍重新 ATC 编译 OM、校验和采样，使用独立编译缓存。
+
+可用 `--build-cache /home/ma-user/work/paretopilot-cache` 指定缓存，或 `--no-build-cache` 关闭缓存。首次构建仍可能较慢；复用只消除 configure/build/package/install，不消除 ATC 和测量耗时。
 
 关键复测字段：`confirmation.primary_baseline_us` 是默认 V3 耗时，`candidate_us` 是候选耗时，
 `primary_speedup` / `source_speedup` 是相对 V3 的加速比，`stock_reference_us` / `baseline_us` 是 V2 耗时，

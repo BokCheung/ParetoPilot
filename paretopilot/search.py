@@ -101,7 +101,7 @@ def confirmation(config, winner, backend, root):
     return result
 
 
-def run(config, output, progress=None, baseline_only=False):
+def run(config, output, progress=None, baseline_only=False, smoke=False):
     if baseline_config(config) and not baseline_only:
         raise TuningError("baseline_only workload: use the baseline command; 3D candidate tuning is not supported")
     root = Path(output).resolve()
@@ -129,6 +129,18 @@ def run(config, output, progress=None, baseline_only=False):
         if not environment["ready"]:
             raise TuningError(f"Environment checks failed; see {root/'environment.json'} and run doctor")
     backend = AscendBackend(config, root) if config["backend"] == "ascend" else SimulationBackend(config, root)
+    if smoke and batch_enabled(config) and not baseline_only:
+        source = evaluate(backend, config, default_params(config), root/"source_baseline", "source_baseline")
+        if source["status"] != "ok":
+            raise TuningError(f"BatchMatMulV3 smoke failed: {source['error']}")
+        result = {"mode": config["backend"], "status": "smoke_passed", "scope": "source_smoke",
+                  "primary_baseline": "source_baseline", "source_baseline": source,
+                  "selected": "source_baseline", "tuning_accepted": False,
+                  "reason": "Source compile, correctness and profiling verified; performance gain not evaluated",
+                  "report": str(root/"report.html")}
+        write_json(root/"summary.json", result)
+        write_baseline_report(root, config, source)
+        return result
     baseline = evaluate(backend, config, {}, root/"baseline", "baseline")
     if baseline["status"] != "ok":
         raise TuningError(f"Baseline failed: {baseline['error']}")

@@ -24,7 +24,7 @@ def parser():
         cmd.add_argument("--config", required=True)
         if name in ("baseline", "run"):
             cmd.add_argument("--output", required=True, help="New empty experiment directory")
-            cmd.add_argument("--smoke", action="store_true", help="Limit to one candidate and two confirmation rounds")
+            cmd.add_argument("--smoke", action="store_true", help="BatchMatMulV3: one source correctness/profile check; other adapters: one candidate and two confirmation rounds")
         if name == "doctor":
             cmd.add_argument("--output", help="Optional JSON environment record")
     cmd = sub.add_parser("inspect-profile", help="List exact task identifiers and counts in a CSV")
@@ -74,7 +74,7 @@ def main(argv=None):
                     raise TuningError("Ascend backend requires the Linux 910B/CANN test machine; use simulation here")
                 def progress(t, count):
                     print(f"[{count}/{c['search']['budget']}] {t['status']}: "+(f"{t['duration_us']:.4f} us" if t['status']=='ok' else t['error']), file=sys.stderr, flush=True)
-                result = run(c, args.output, progress, baseline_only=args.command == "baseline")
+                result = run(c, args.output, progress, baseline_only=args.command == "baseline", smoke=args.smoke)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if isinstance(result, dict) and result.get("successful_candidates") == 0 else 0
     except (TuningError, OSError, ImportError, subprocess.SubprocessError) as exc:

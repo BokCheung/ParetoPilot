@@ -223,7 +223,7 @@ class OfficialBatchMatmulTests(unittest.TestCase):
         with patch.object(official, "materialize", side_effect=materialize), \
              patch.object(official, "run_command", side_effect=command), \
              patch.object(official.platform, "machine", return_value="aarch64"):
-            result = official.build_official(self.c, official.BATCH_DEFAULT_PARAMS.copy(), self.root, {"ASCEND_OPP_PATH": str(self.root/"system-opp")})
+            result = official._build_official(self.c, official.BATCH_DEFAULT_PARAMS.copy(), self.root, {"ASCEND_OPP_PATH": str(self.root/"system-opp")})
         self.assertIn("-DASCEND_COMPUTE_UNIT=ascend910b", commands[0])
         self.assertIn("-DASCEND_OP_NAME=batch_mat_mul_v3", commands[0])
         self.assertIn("-DASCEND_COMPILE_OPS=mat_mul_v3;batch_mat_mul_v3;matmul.common", commands[0])
@@ -252,10 +252,13 @@ class OfficialBatchMatmulTests(unittest.TestCase):
             opp.mkdir()
             (opp/"kernel.so").write_bytes(b"immutable package")
             return {"opp_path": str(opp), "source_dir": str(directory/"project"),
-                    "installed_sha256": tree_hash(opp), "operator": "BatchMatMulV3", "commit": official.COMMIT}
+                    "installed_sha256": tree_hash(opp), "operator": "BatchMatMulV3", "commit": official.COMMIT,
+                    "parameter_binding": "atc_process_environment"}
         def command(argv, directory, name, env):
             calls.append(name)
             if name == "atc":
+                self.assertEqual(env["PARETOPILOT_REQUEST_HASH"], digest(params))
+                self.assertEqual(env["PARETOPILOT_CORE_LIMIT"], "0")
                 self.assertTrue(Path(env["ASCEND_CACHE_PATH"]).is_relative_to(directory))
                 (directory/"model.om").write_bytes(b"mock OM")
                 record = self.trial("source_baseline")["selection"]["effective_tiling"][0]

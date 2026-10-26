@@ -85,9 +85,11 @@ def extract(archive, destination):
                 path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def materialize(project, params, *, batch=False):
+def materialize(project, params, *, batch=False, runtime=False):
     """Extract verified originals and record every adaptation with before/after hashes."""
     validate_params(params, batch=batch)
+    if runtime and not batch:
+        raise TuningError("Runtime Host controls currently require BatchMatMulV3")
     manifest = verify_bundle()
     project = Path(project)
     project.mkdir(parents=True, exist_ok=False)
@@ -168,6 +170,14 @@ namespace ops {""")
         static_cast<unsigned long long>(tilingKey_));""")
     header = "#pragma once\n" + ''.join(f"#define PP_{k.upper()} {v}\n" for k, v in sorted(params.items()))
     header += f'#define PP_PARAMS_HASH "{digest(params)}"\n#define PP_SOURCE_COMMIT "{COMMIT}"\n'
+    if runtime:
+        from .official_cache import runtime_header
+        header = runtime_header()
+        replace(HOST, "    // ParetoPilot: change the input core budget BEFORE upstream derives tiling.", """    if (!PP_PARAMS_VALID) {
+        OP_LOGE(context_->GetNodeName(), "Missing or invalid ParetoPilot runtime Host parameters");
+        return ge::GRAPH_FAILED;
+    }
+    // ParetoPilot: change the input core budget BEFORE upstream derives tiling.""")
     (project/HOST).with_name("paretopilot_params.h").write_text(header, encoding="utf-8")
     if batch:
         replace(BATCH_INFER, "} // namespace", """static ge::graphStatus InferDataTypeForBatchMatMulV3(gert::InferDataTypeContext* context)
@@ -235,10 +245,17 @@ def verify_installed_implementations(generated, vendor):
 
 
 def build_official(config, params, directory, env):
+    if batch_enabled(config) and config["implementation"].get("build_cache", True):
+        from .official_cache import cached_build
+        return cached_build(config, params, directory, env)
+    return _build_official(config, params, directory, env)
+
+
+def _build_official(config, params, directory, env, *, runtime=False):
     batch = batch_enabled(config)
     legacy, legacy_relative = legacy_library(env)
     project = directory/"project"
-    provenance = materialize(project, params, batch=batch)
+    provenance = materialize(project, params, batch=batch, runtime=runtime)
     write_json(directory/"source_manifest.json", provenance)
     write_json(directory/"params.json", params)
     timeout = config["measurement"]["timeout_s"]
@@ -278,6 +295,8 @@ def build_official(config, params, directory, env):
     result = {**provenance, "implementation": BATCH_KIND if batch else KIND, "op_type": provenance["operator"], "opp_path": str(vendors[0]),
               "source_dir": str(project), "package": str(packages[0]), "installed_sha256": tree_hash(vendors[0]),
               "python_implementations": implementation_hashes,
+              "parameter_binding": "atc_process_environment" if runtime else "compiled_header",
+              "isolated_legacy_library": str(legacy_copy),
               "legacy_library": str(legacy), "legacy_library_sha256": file_hash(legacy_copy)}
     write_json(directory/"build_manifest.json", result)
     return result

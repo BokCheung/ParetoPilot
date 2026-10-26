@@ -24,6 +24,12 @@ def load_config(path):
             raise TuningError("implementation.kind must be bundled, cann_matmul_v3, cann_batch_matmul_v3 or baseline_only")
         if type(implementation.get("require_same_operator", True)) is not bool:
             raise TuningError("implementation.require_same_operator must be a boolean")
+        if type(implementation.get("build_cache", True)) is not bool:
+            raise TuningError("implementation.build_cache must be a boolean")
+        if "cache_dir" in implementation:
+            if not isinstance(implementation["cache_dir"], str) or not implementation["cache_dir"]:
+                raise TuningError("implementation.cache_dir must be a nonempty path")
+            implementation["cache_dir"] = str((source.parent/Path(implementation["cache_dir"]).expanduser()).resolve())
         baseline = baseline_only(c)
         if baseline and (c["backend"] != "ascend" or op["kind"] != "matmul"):
             raise TuningError("baseline_only requires Ascend MatMul")
