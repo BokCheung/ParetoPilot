@@ -1,6 +1,7 @@
 import json
 from contextlib import redirect_stdout, redirect_stderr
 import io
+import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
@@ -148,7 +149,7 @@ class InspectCannOperatorTests(unittest.TestCase):
             "BatchMatMulV2 compile capability is available\n"*200+
             "node[target] op[BatchMatMulV2] dispatch online compile kernel_name=late_kernel\n"+
             "node[target] op[BatchMatMulV2] tiling_key=99 block_dim=24\n")
-        with redirect_stdout(io.StringIO()) as out:
+        with patch.object(script, "baseline_node_names", return_value=(["target"], None)), redirect_stdout(io.StringIO()) as out:
             script.branch_evidence(self.root)
         text = out.getvalue()
         self.assertIn("late_kernel", text)
@@ -158,6 +159,48 @@ class InspectCannOperatorTests(unittest.TestCase):
         self.assertIn("Target branch matches: 202; shown: 20", text)
         self.assertIn("[node]", text)
         self.assertLess(len(text.encode("utf-8")), 8000)
+
+    @unittest.skipUnless(importlib.util.find_spec("onnx"), "onnx required")
+    def test_branch_evidence_uses_baseline_node_identity_not_input_parameter_names(self):
+        import onnx
+        from onnx import helper, TensorProto
+        model_path = self.root/"baseline.onnx"
+        node = helper.make_node("MatMul", ["a", "b"], ["c"], name="/MatMul")
+        inputs = [helper.make_tensor_value_info(n, TensorProto.FLOAT16, [256, 256]) for n in ("a", "b")]
+        output = helper.make_tensor_value_info("c", TensorProto.FLOAT16, [256, 256])
+        onnx.save(helper.make_model(helper.make_graph([node], "baseline", inputs, [output])), str(model_path))
+        write_json(self.root/"report.json", {"model": script.file_record(model_path)})
+        noise = ('[fusion_binary_info.cc:221] GenerateInOutPutMode jsonValue: '
+                 '{"formatMode":"static_nd_agnostic","index":1,"name":"target","paramType":"required"}\n')
+        (self.root/"plog.log").write_text(noise*1000+
+            'OtherBinaryInfo jsonValue: {"name":"target","kernel_name":"wrong"}\n'+
+            'node[/MatMul] op[BatchMatMulV2] reuse binary kernel_name=correct\n'+
+            'op name is /MatMul, tiling_key=17 block_dim=24\n'+
+            '[fusion_binary_info.cc:500] node[/MatMul] selected kernel_name=selected_file\n')
+        self.assertEqual(script.baseline_node_names(self.root), (["/MatMul"], None))
+        with redirect_stdout(io.StringIO()) as out:
+            script.branch_evidence(self.root)
+        text = out.getvalue()
+        self.assertIn('Baseline model nodes: ["/MatMul"]', text)
+        self.assertIn("[node]", text)
+        self.assertIn("kernel_name=correct", text)
+        self.assertIn("tiling_key=17", text)
+        self.assertIn("kernel_name=selected_file", text)
+        self.assertNotIn("wrong", text)
+        self.assertNotIn("GenerateInOutPutMode", text)
+        self.assertIn("Target branch matches: 3", text)
+        model_path.write_bytes(b"changed model")
+        self.assertEqual(script.baseline_node_names(self.root)[0], [])
+        write_json(self.root/"report.json", {"model": script.file_record(model_path)})
+        self.assertIn("Cannot parse recorded baseline ONNX", script.baseline_node_names(self.root)[1])
+
+    def test_unknown_model_does_not_promote_generic_name_target_to_node(self):
+        (self.root/"plog.log").write_text('BinaryInfo {"name":"target","kernel_name":"wrong"}\n')
+        with redirect_stdout(io.StringIO()) as out:
+            script.branch_evidence(self.root)
+        self.assertNotIn("[node]", out.getvalue())
+        self.assertNotIn("kernel_name=wrong", out.getvalue())
+        self.assertIn("Target branch matches: 0", out.getvalue())
 
     def test_exact_operator_match_excludes_weight_quant_but_keeps_kernel_suffixes(self):
         self.assertIsNone(script.OP_MATCH.search("WeightQuantBatchMatmulV2"))

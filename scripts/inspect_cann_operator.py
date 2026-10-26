@@ -204,6 +204,26 @@ def collect_evidence(output, opened, warnings):
                             return
 
 
+def baseline_node_names(output):
+    """Get graph-node identities from the recorded model, never tensor names."""
+    try:
+        report = read_json(Path(output)/"report.json")
+        model = Path(report["model"]["path"])
+        expected = report["model"].get("sha256")
+        if expected and file_record(model)["sha256"] != expected:
+            raise TuningError("Baseline ONNX differs from the model recorded in this diagnostic")
+        import onnx
+        try:
+            graph = onnx.load_model(str(model), load_external_data=False).graph
+        except Exception as exc:
+            return [], f"Cannot parse recorded baseline ONNX: {exc}"
+        names = sorted({node.name for node in graph.node if node.name and
+                        node.op_type in ("MatMul", "Gemm", "BatchMatMul", "BatchMatMulV2")})
+        return names, None
+    except (OSError, TuningError, KeyError, ImportError, ValueError) as exc:
+        return [], str(exc)
+
+
 def branch_evidence(output):
     """Scan to EOF, retaining a bounded set of the highest-signal records."""
     import heapq
@@ -213,18 +233,29 @@ def branch_evidence(output):
     paths.sort(key=lambda p: ("op_compile_stats" not in p.name, "plog" not in p.name, str(p)))
     signal = re.compile(r"compil|reuse|binary|tiling|oppath|op.path|kernel|dispatch|fallback|select|build", re.I)
     registration_noise = re.compile(r"Register|register|OpImplRegister|InitData|PrintOptionMap|"
-                                    r"InitOpsKernelInfo|ops_json_file\.cc|WeightQuantBatchMatmulV2", re.I)
-    node_name = re.compile(r"\b(?:node|op|opname|op_name|node_name|name)\b.{0,32}?\btarget\b", re.I)
+                                    r"InitOpsKernelInfo|ops_json_file\.cc|WeightQuantBatchMatmulV2|"
+                                    r"GenerateInOutPutMode", re.I)
+    names, model_error = baseline_node_names(output)
+    # A JSON input descriptor such as {"name":"target"} is not a graph node.
+    # Only explicit op/node context plus a name from the baseline model counts.
+    node_name = None
+    if names:
+        prefix = r"\b(?:node|op)(?:_name|\s+name)?(?:\s*[:=\[(]\s*|\s+(?:is\s+)?)['\"]?"
+        suffix = r"(?=$|[\s'\"\],):])"
+        node_name = re.compile(prefix+"(?:"+"|".join(re.escape(n) for n in names)+")"+suffix, re.I)
     reuse = re.compile(r"reuse|dispatch\s+online|online\s+compil", re.I)
     artifact = re.compile(r"oppath|op.path|impl.path|kernel.?name|tiling.?key|block.?dim|binFileName", re.I)
     matched, unreadable = 0, 0
     best = []
     print("=== TARGET COMPILE BRANCH EVIDENCE ===")
+    print("Baseline model nodes: "+json.dumps(names, ensure_ascii=False))
+    if model_error:
+        print("Model identity unavailable; only op-type matches can be reported: "+model_error[:180])
     for path in paths:
         try:
             with path.open(encoding="utf-8", errors="replace") as stream:
                 for i, line in enumerate(stream, 1):
-                    node = bool(node_name.search(line))
+                    node = bool(node_name and node_name.search(line))
                     if (not (node or OP_MATCH.search(line)) or not signal.search(line)
                             or registration_noise.search(line)):
                         continue
