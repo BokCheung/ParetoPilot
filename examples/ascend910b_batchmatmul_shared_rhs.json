@@ -1,0 +1,78 @@
+{
+  "backend": "ascend",
+  "operator": {
+    "kind": "matmul",
+    "dtype": "float16",
+    "m": 100,
+    "n": 256,
+    "k": 128,
+    "batch": 32,
+    "batch_mode": "shared_rhs"
+  },
+  "baseline": {
+    "kind": "builtin"
+  },
+  "hardware": {
+    "peak_flops": 200000000000000,
+    "bandwidth_bytes_s": 1000000000000,
+    "local_memory_bytes": 196608,
+    "max_blocks": 24,
+    "alignment": 16,
+    "note": "Illustrative Roofline assumptions, NOT verified 910B specifications. Set measured or documented values for your exact chip and dtype."
+  },
+  "space": {
+    "core_limit": [
+      0,
+      12,
+      24
+    ],
+    "tiling_policy": [
+      0,
+      1
+    ],
+    "batch_strategy": [
+      0,
+      1
+    ]
+  },
+  "search": {
+    "population": 4,
+    "generations": 3,
+    "budget": 8,
+    "seed": 42,
+    "mutation_rate": 0.25,
+    "min_gain": 0.03
+  },
+  "measurement": {
+    "warmup": 5,
+    "repeats": 20,
+    "confirmation_rounds": 3,
+    "rtol": 0.01,
+    "atol": 0.01,
+    "timeout_s": 3600,
+    "selectors": {
+      "baseline": {
+        "Op Type": "BatchMatMulV2"
+      },
+      "source_baseline": {
+        "Op Type": "BatchMatMulV3"
+      },
+      "candidate": {
+        "Op Type": "BatchMatMulV3"
+      }
+    }
+  },
+  "agent": {
+    "kind": "dummy"
+  },
+  "ascend": {
+    "soc_version": "Ascend910B2",
+    "cann_version": "8.5.0",
+    "source_tag": "cann-ops-nn-8.5.0-9f8a66e795ef1842c2118cf5bbadfe3624bdd1ef-batchmatmul",
+    "device": 0
+  },
+  "implementation": {
+    "kind": "cann_batch_matmul_v3",
+    "build_jobs": 4
+  }
+}

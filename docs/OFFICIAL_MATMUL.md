@@ -1,5 +1,7 @@
 # CANN 8.5.0 官方 MatMul 源码调优
 
+> 此文保留旧二维 MatMulV3 路线。当前默认是 [BatchMatMulV3 源码基线与调优](OFFICIAL_BATCHMATMUL.md)，覆盖二维及两个三维用例。复现本页一键命令须添加 `--matmul-implementation legacy`。
+
 默认真实 MatMul 配置已切换为 `implementation.kind=cann_matmul_v3`。使用 [CANN ops-nn 官方仓库](https://gitcode.com/cann/ops-nn) `8.5.0` 分支的固定提交 `9f8a66e795ef1842c2118cf5bbadfe3624bdd1ef`，算子目录为 `matmul/mat_mul_v3`。原始源码、公共依赖、JSON 头文件、makeself 及许可证均随 GitHub 仓库分发，测试机不需要访问 GitCode，也不需要 Agent 服务。
 
 这与旧的 `PpMatmul` 教学式高阶 API 模板不同：新流程直接编译官方 Host tiling 和完整 Device kernel；没有重新手写矩阵乘法计算实现。CANN 内置 ONNX MatMul 在已测机器上显示为 `BatchMatMulV2`，本源码导出为 `MatMulV3`，不能声称它就是安装包中那个算子的逐字源码或相同二进制。

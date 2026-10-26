@@ -2,7 +2,7 @@
 
 旧版外部 stage 请求/响应适配器占位协议已由内置后端替换。用户不需要实现 adapter 命令。入口为 backend.AscendBackend，重依赖和设备状态隔离在 worker 子进程。
 
-官方 MatMul 的默认配置、参数、来源和三路对照见 [官方源码调优](OFFICIAL_MATMUL.md)。Device 源码保持上游原样，不适用下文旧模板的固定 key=1 描述。
+当前默认 BatchMatMulV3 的配置、参数和三路对照见 [BatchMatMulV3 源码调优](OFFICIAL_BATCHMATMUL.md)；旧二维 MatMulV3 见 [旧源码调优](OFFICIAL_MATMUL.md)。Device 源码保持上游原样，不适用下文旧模板的固定 key=1 描述。
 
 ## 模块与阶段
 

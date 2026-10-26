@@ -18,7 +18,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from paretopilot.config import load_config
-from paretopilot.official import enabled as official_enabled, DEFAULT_PARAMS, COMMIT
+from paretopilot.official import enabled as official_enabled, batch_enabled, default_params, COMMIT
 from paretopilot.search import confirmation_roles
 from paretopilot.workload import baseline_only, shapes
 from paretopilot.routing import same_operator
@@ -46,7 +46,8 @@ def parser():
     p.add_argument("--soc", required=True, help="Exact target SoC, e.g. Ascend910B1; check npu-smi")
     p.add_argument("--device", type=nonnegative, default=0)
     p.add_argument("--operator", choices=("all", "matmul", "add"), default="all", help="Select hardware acceptance stages")
-    p.add_argument("--matmul-case", choices=("2d", "shared_rhs", "batched_rhs", "3d", "all"), default="2d", help="3D cases are baseline benchmarks only; all retains the 2D tuning stages")
+    p.add_argument("--matmul-implementation", choices=("batch-v3", "legacy"), default="batch-v3", help="Default: BatchMatMulV3 source baseline and Host tiling; legacy retains earlier MatMulV3/baseline-only cases")
+    p.add_argument("--matmul-case", choices=("2d", "shared_rhs", "batched_rhs", "3d", "all"), default="2d", help="Choose 2D/3D workloads; batch-v3 tunes all cases, legacy 3D cases are baseline-only")
     p.add_argument("--scope", choices=("smoke", "full"), default="full", help="Both run preflight, unit tests, simulation, baselines and smoke; full also searches both operators")
     p.add_argument("--deps", choices=("install", "offline", "check"), default="install", help="install/offline use an isolated venv; check uses this interpreter without installing dependencies")
     p.add_argument("--wheelhouse", type=Path, help="Local wheels for --deps offline")
@@ -109,7 +110,7 @@ class Session:
     def __init__(self, root, args):
         self.root, self.env = root, os.environ.copy()
         self.data = {"status": "running", "started_utc": datetime.now(timezone.utc).isoformat(),
-                     "scope": args.scope, "matmul_case": args.matmul_case, "soc": args.soc, "device": args.device, "stages": [], "results": {}}
+                     "scope": args.scope, "matmul_case": args.matmul_case, "matmul_implementation": args.matmul_implementation, "soc": args.soc, "device": args.device, "stages": [], "results": {}}
         self.save()
 
     def save(self):
@@ -215,7 +216,7 @@ def prepare_configs(args, output):
         smoke = deepcopy(config)
         smoke["space"] = {name: [values[0]] for name, values in config["space"].items()}
         if official_enabled(config):
-            smoke["space"] = {k: [v] for k, v in DEFAULT_PARAMS.items()}
+            smoke["space"] = {k: [v] for k, v in default_params(config).items()}
         else:
             smoke["space"]["block_dim"] = [1]
         for suffix, value in ((kind, config), (kind+"-smoke", smoke)):
@@ -232,15 +233,16 @@ def operator_kinds(args):
 
 def workload_cases(args):
     cases = []
+    matmul_stem = "batchmatmul" if args.matmul_implementation == "batch-v3" else "matmul"
     for kind in operator_kinds(args):
         if kind == "add":
             cases.append((kind, "ascend910b_add.json"))
             continue
         if args.matmul_case in ("2d", "all"):
-            cases.append((kind, "ascend910b_matmul.json"))
+            cases.append((kind, f"ascend910b_{matmul_stem}.json"))
         for mode in ("shared_rhs", "batched_rhs"):
             if args.matmul_case in (mode, "3d", "all"):
-                cases.append(("matmul-"+mode.replace("_", "-"), "ascend910b_matmul_"+mode+".json"))
+                cases.append(("matmul-"+mode.replace("_", "-"), "ascend910b_"+matmul_stem+"_"+mode+".json"))
     return cases
 
 
@@ -293,10 +295,23 @@ def verify_result(directory, smoke):
         source_trials = [result["source_baseline"], *good, *(t for t in confirmation if t["role"] != "baseline")]
         if any(t.get("selection", {}).get("commit") != COMMIT or not t.get("selection", {}).get("effective_tiling") for t in source_trials):
             raise TuningError(f"{directory.name}: official source identity/effective tiling evidence missing")
+    if batch_enabled(config):
+        if result.get("primary_baseline") != "source_baseline" or result.get("selected") not in ("candidate", "source_baseline"):
+            raise TuningError(f"{directory.name}: BatchMatMulV3 primary-baseline policy violated")
+        all_trials = [result["baseline"], result["source_baseline"], *good, *confirmation]
+        for trial in all_trials:
+            expected_op = "BatchMatMulV2" if trial.get("role") == "baseline" else "BatchMatMulV3"
+            inputs, output = shapes(config["operator"])
+            if (trial.get("operator_identity", {}).get("Op Type") != expected_op
+                    or trial.get("input_shapes") != inputs or trial.get("output_shape") != output
+                    or len(trial.get("samples_us", [])) != config["measurement"]["repeats"]):
+                raise TuningError(f"{directory.name}: BatchMatMulV3 shape/operator/sample evidence invalid")
+            if trial.get("role") != "baseline" and trial["selection"].get("operator") != "BatchMatMulV3":
+                raise TuningError(f"{directory.name}: wrong official source operator")
     return {"status": "passed", "successful_candidates": len(good), "failed_candidates": len(history)-len(good),
             "selected": result["selected"], "selected_params": result["selected_params"],
             "reason": result["confirmation"]["reason"], "report": str(directory/"report.html"),
-            "task_metrics": {k: result["confirmation"][k] for k in ("baseline_us", "source_baseline_us", "candidate_us", "speedup", "source_speedup", "tuning_accepted") if k in result["confirmation"]}}
+            "task_metrics": {k: result["confirmation"][k] for k in ("baseline_us", "source_baseline_us", "candidate_us", "speedup", "source_speedup", "primary_baseline_us", "primary_speedup", "stock_reference_us", "stock_speedup", "effective_tiling_changed", "tuning_accepted") if k in result["confirmation"]}}
 
 
 def execute_suite(session, args, python, configs):
@@ -320,6 +335,8 @@ def execute_suite(session, args, python, configs):
         session.run("simulation-"+kind, cli+["run", "--config", str(ROOT/f"examples/simulation_{kind}.json"), "--output", str(session.root/("simulation-"+kind))])
     unavailable = set()
     for kind in kinds:
+        if batch_enabled(read_json(configs[kind])):
+            continue  # The source baseline is built inside each run before any candidate.
         session.run(kind+"-baseline", cli+["baseline", "--config", str(configs[kind]), "--output", str(session.root/(kind+"-baseline"))])
         routing_path = session.root/(kind+"-baseline")/"routing.json"
         routing = read_json(routing_path) if routing_path.is_file() else {}

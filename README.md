@@ -1,163 +1,91 @@
 # ParetoPilot
 
-固定 shape/dtype 的昇腾算子参数搜索工具。目标测试环境为 **Linux、Ascend 910B、CANN 8.5.0**，无需 Agent 接口、API Key 或联网推理。
+固定 shape/dtype 的昇腾算子调优工具，目标环境为 **Linux、Ascend 910B2、CANN 8.5.0**。
+默认 MatMul 路线使用固定版本的 **BatchMatMulV3 完整源码**建立基线，再调优同一源码的 Host tiling。
+内置 BatchMatMulV2 只作性能参照。保留 Roofline、Dummy Agent，不需要 Agent 服务或 API Key。
 
-当前实现：PyTorch 参考输出与 ONNX 导出 → ATC 内置基线 → CANN 8.5.0 官方 MatMulV3 源码默认配置 → Roofline → Dummy Agent 参数域 → 遗传搜索 → 同源候选编译、ATC → PyACL 正确性与 profiling → 三路交错复测 → 报告。Add 保留原有内置 Ascend C 模板。
-
-官方源码来源、参数语义和 910B2 命令见 [官方 MatMul 调优](docs/OFFICIAL_MATMUL.md)。
+流程：PyTorch 正确性参考与 ONNX 导出 → V2 性能参照 → 默认 V3 源码基线 → Roofline →
+Dummy Agent 参数域 → 遗传搜索 → 同源候选 → 三路交错复测 → 报告。
+Add 保留原有 Ascend C 模板。
 
 ## 支持范围
 
-| 项目 | 当前支持 |
-| --- | --- |
-| MatMul | 二维 FP16，M/N/K 为 16 的倍数，ND 输入输出，无转置、bias、batch |
-| Elementwise | 两输入同 shape 的 FP16 Add，支持任意正整数 numel 与尾块 |
-| 参数 | 官方 MatMul: core_limit、tiling_policy；分块和缓冲由官方 tiler 计算 |
-| 参数 | Add: tile_elems、buffers=1/2、block_dim |
-| Agent | 默认 DummyAgent，原样返回配置参数域；每代保存 Roofline/历史输入与建议输出 |
-| 指标 | 各路 OM 目标任务 Task Duration(us) 中位数 |
-| 报告 | HTML、Markdown、Roofline SVG、CSV、JSON、阶段日志、参数/源码/OM 哈希 |
-
-官方 MatMul 源码及构建依赖已随仓库打包，测试机通过 GitHub 拉取即可；Add 使用 msopgen 构建框架。**本地没有 NPU/CANN，新官方源码路径仍需在 910B2 上完成编译、精度和性能验收。**
-
-## 本机运行模拟闭环
-
-Python 3.10+，控制器只依赖标准库。在项目根目录运行：
-
-```bash
-python -m paretopilot validate --config examples/simulation_matmul.json
-python -m paretopilot run --config examples/simulation_matmul.json --output runs/sim-matmul
-python -m paretopilot run --config examples/simulation_add.json --output runs/sim-add
-```
-
-打开输出目录的 `report.html`。模拟模式的耗时与正确性结果均为合成数据，不能用于声明硬件收益。输出目录必须为空；已有试验不会被覆盖。
-
-## 搬到昇腾机器
-
-在 Linux 测试机上，用能匹配 PyACL 的 Python 3.10–3.12 执行一键测试：
-
-```bash
-python3 scripts/test_910b.py \
-  --cann-path /usr/local/Ascend/cann-8.5.0 \
-  --soc Ascend910B2 \
-  --device 0 --deps check --scope full --timeout 3600
-```
-
-按实际安装路径和芯片型号调整参数。上面的命令使用已装好的依赖；脚本自动加载 CANN 环境，然后执行环境检查、单元测试、两套模拟流程、真实基线、smoke 和完整搜索。只做首次试跑可添加 `--scope smoke`；复用已有 Python 依赖可添加 `--deps check`；离线安装使用 `--deps offline --wheelhouse /path/to/wheels`。
-
-结果写入独立的 `runs/910b-*` 目录，包含 `test-summary.json`、阶段日志和 `diagnostics.zip`。任何阶段或最终复测失败都会停止后续阶段；收益不足而保留基线可正常通过。完整选项见 [部署步骤](docs/DEPLOYMENT.md)。
-
-如需通过源码 ZIP 迁移：
-
-```bash
-python -m paretopilot package --output dist/ParetoPilot-ascend-910b-cann850.zip
-```
-
-ZIP 包含源码、算子模板、示例、一键脚本、依赖清单、文档和测试，不含本机虚拟环境、模拟结果、CANN 或 Python 第三方 wheel。拷贝解压后按 [部署步骤](docs/DEPLOYMENT.md) 执行。无需复制本机的 Windows 虚拟环境。
-
-```bash
-python -m paretopilot doctor --config examples/ascend910b_add.json --output environment.json
-python -m paretopilot run --config examples/ascend910b_add.json --output runs/add-smoke --smoke
-python -m paretopilot run --config examples/ascend910b_matmul.json --output runs/matmul-smoke --smoke
-```
-
-官方 MatMul 示例 SoC 为 `Ascend910B2`；一键脚本统一用 `--soc` 覆盖所选算子的配置。Roofline 的算力、带宽只是示例假设，需要替换成该芯片、dtype、稠密口径下的数值。配置通过不代表硬件参数已验证。
-
-## 三维 MatMul 基线
-
-现有二维官方源码调优用例保持不变，另提供两种 FP16 三维基线：
-
 | 用例 | 输入 A | 输入 B | 输出 | 配置 |
 | --- | --- | --- | --- | --- |
-| 共享权重投影 | `[32,100,128]` | `[128,256]` | `[32,100,256]` | `examples/ascend910b_matmul_shared_rhs.json` |
-| 每个请求独立的候选打分 | `[32,1,128]` | `[32,128,100]` | `[32,1,100]` | `examples/ascend910b_matmul_batched_rhs.json` |
+| 二维 MatMul | `[256,256]` | `[256,256]` | `[256,256]` | `examples/ascend910b_batchmatmul.json` |
+| 共享权重投影 | `[32,100,128]` | `[128,256]` | `[32,100,256]` | `examples/ascend910b_batchmatmul_shared_rhs.json` |
+| 独立候选打分 | `[32,1,128]` | `[32,128,100]` | `[32,1,100]` | `examples/ascend910b_batchmatmul_batched_rhs.json` |
 
-在 910B2 上同时运行这两个基线：
+以上用例均为 FP16、外部 ND、无转置和 bias，均接入 V3 源码调优；支持示例中的非对齐维度与
+批次广播。Host 参数是 `core_limit`、`tiling_policy`、`batch_strategy`，分块及缓冲由官方算法计算。
+Add 支持任意正整数 numel 和尾块，参数为 `tile_elems`、`buffers`、`block_dim`。
+
+官方源码与离线构建依赖已随 GitHub 仓库打包。**本地没有 CANN/NPU；源码编译、精度和性能仍需在
+910B2 上验收。** 构建依赖、源码适配范围和控制点见 [BatchMatMulV3 源码调优](docs/OFFICIAL_BATCHMATMUL.md)。
+
+## 在 910B2 上测试
+
+首次确认三个用例的源码均能编译运行：
 
 ```bash
-python3 scripts/test_910b.py \
+cd /home/ma-user/work/ParetoPilot
+git pull --ff-only origin main
+/home/ma-user/anaconda3/envs/PyTorch-2.6.0/bin/python3 scripts/test_910b.py \
   --cann-path /usr/local/Ascend/cann-8.5.0 \
   --soc Ascend910B2 --device 0 --deps check \
-  --operator matmul --matmul-case 3d --scope smoke --timeout 3600
+  --operator matmul --matmul-implementation batch-v3 --matmul-case all \
+  --scope smoke --timeout 3600
 ```
 
-`--matmul-case` 默认 `2d`，可选 `shared_rhs`、`batched_rhs`、`3d`（两个三维用例）或 `all`（二维加两个三维用例）。三维阶段使用已安装 CANN 的内置实现，完成 ONNX 导出、ATC 编译、真实输出精度检查、预热后 20 次目标任务采样和 Roofline 分析。`test-summary.json` 中结果为 `matmul-shared-rhs-baseline`、`matmul-batched-rhs-baseline`，各阶段目录含 `baseline_summary.json`、`report.html` 和 `roofline.svg`。
+把 `--scope smoke` 改成 `--scope full`，执行三个用例的完整 Host tiling 搜索。
+仅跑一个用例可用 `--matmul-case 2d`、`shared_rhs` 或 `batched_rhs`；`3d` 选择两个三维用例。
+`--matmul-implementation` 默认 `batch-v3`，`--matmul-case` 默认 `2d`。
+脚本自动加载 CANN 环境，`--deps check` 不安装依赖。无需 sudo。
+完整安装/离线安装选项见 [部署](docs/DEPLOYMENT.md)。
 
-这两个配置标为 `implementation.kind=baseline_only`，参数域为空。当前候选适配器只支持二维，因此三维阶段不会调用源码候选或 Agent，也不报告调优收益；`--scope full` 对它们仍只测基线。Roofline 和 Dummy Agent 接口继续保留，后续接入三维候选时再扩展参数域。Roofline 的共享权重流量只计一份，独立批次权重计 batch 份；这是形状下界，不代表实测 DRAM 流量。
+smoke 使用默认 V3 参数，只验证流程与复测，不声明调优收益。
+full 的候选必须相对默认 V3 的收益超过最小阈值及观测噪声，并有稳定、不同的实际 tiling，才接受收益。
+即使候选仍慢于 V2，也会如实报告 V3 相对自身源码基线的收益；V2 不参与源码实现选择。
+没有收益时选择 `source_baseline`。
 
-配置中的 `operator.batch` 与 `operator.batch_mode` 必须同时设置，模式为 `shared_rhs` 或 `batched_rhs`。即使 batch 为 1，也保留三维输入。默认自动识别实际 MatMul profiling 算子，并严格要求恰好 20 个唯一目标任务样本；识别有歧义时先查看 `profile_inventory.json`，不能把其他任务混入耗时。
+## 结果
 
-## 自定义基线与未来 Agent
+每次运行创建 `runs/910b-*`，不覆盖已有结果。`test-summary.json` 汇总所选用例，阶段结果为：
 
-- 基线：`examples/baseline_matmul.py` 提供 `build_case(operator, seed)`。输入/输出须保持上述固定语义，候选模板不会自动翻译任意 Python 算子。
-- Agent：见 [扩展接口](docs/AGENT.md)。只需替换本地插件 `propose(context)`，保留现有构建和搜索流程。
-- 构建与测量：见 [真实后端说明](docs/ADAPTER.md)。
-- 搜索与判定：见 [设计](docs/DESIGN.md)。
+- `matmul-smoke` / `matmul-full`
+- `matmul-shared-rhs-smoke` / `matmul-shared-rhs-full`
+- `matmul-batched-rhs-smoke` / `matmul-batched-rhs-full`
 
-## 验证
+每个阶段有 `summary.json`、`report.html`、`report.md`、`roofline.svg` 和 `trials.csv`。
+`baseline/` 是 V2 性能参照；`source_baseline/` 是默认 V3 源码构建；`trials/` 是候选；
+`confirmation/` 是交错复测。各源构建保存源码/适配/安装哈希和实际 tiling。
+相同参数可复用经哈希验证的本次私有 OPP 构建，但每次仍重新 ATC 编译 OM、校验和采样，使用独立编译缓存。
+
+关键复测字段：`confirmation.primary_baseline_us` 是默认 V3 耗时，`candidate_us` 是候选耗时，
+`primary_speedup` / `source_speedup` 是相对 V3 的加速比，`stock_reference_us` / `baseline_us` 是 V2 耗时，
+`stock_speedup` / `speedup` 是相对 V2 的加速比。单位均为目标任务微秒，阶段 `seconds` 包含构建等开销。
+`status=passed` 表示验收通过，不等于 `tuning_accepted=true`。
+
+Roofline 对共享权重只计一份权重流量，独立 batch 权重按 batch 计数；这是形状流量下界。
+算力/带宽示例值是配置假设，需按实际硬件和 dtype 替换，不代表实测规格。
+Dummy Agent 原样返回参数域，每代保留 Roofline/历史输入和建议输出。
+
+## 本机模拟与验证
 
 ```bash
+python -m paretopilot run --config examples/simulation_matmul.json --output runs/sim-matmul
+python -m paretopilot run --config examples/simulation_add.json --output runs/sim-add
 python -m unittest discover -s tests -v
 ```
 
-标准库覆盖控制器和模拟闭环；安装 numpy 后运行 PyACL mock 与数值检查；安装 torch/onnx 后额外运行真实 PyTorch→ONNX 导出测试。缺依赖的相关测试会明确 skip。PyACL mock 只验证调用顺序和清理，不证明 NPU kernel 正确或可编译。
+模拟数据不能证明硬件收益。测试覆盖控制器、源码适配、实际 PyTorch→ONNX 导出和 PyACL mock；
+依赖缺失时相关测试明确 skip。mock 不证明 Ascend kernel 可以编译或运行。
 
+## 扩展与旧流程
 
-## 先识别实际 MatMul 算子，再匹配源码
-
-Ascend MatMul 现在默认先运行内置 baseline，从导出的 profiling CSV 自动识别实际
-`Op Name`、`Op Type` 和设备/流/模型身份，再匹配相同 GE 算子类型的源码适配器。
-不再用配置中预设的 `BatchMatMulV2` 选择器猜测 baseline 类型。识别仍要求唯一目标
-MatMul 任务、恰好 `repeats` 个样本；有多个目标或未知类型时保留 inventory 并报错。
-
-每个 baseline 目录中的 `profile_inventory.json` 记录全部任务，运行根目录的
-`routing.json` 记录实际算子、形状、匹配的源码适配器及是否支持调优。
-`report.html` 也显示识别结果。Roofline 使用该 shape 的 FLOP/流量分析，只有匹配
-源码适配器后才进入 Dummy Agent、参数域搜索及确认测量。
-
-目前适配器支持二维 `MatMulV3` 的固定版本官方源码。只有 baseline 确实选择
-`MatMulV3` 时才会构建该源码；候选和复测的 profiling 类型必须一致。
-如果测得 `BatchMatMulV2`，则保留其 baseline 并记录 `tuning_supported=false`，
-不会替换成 `MatMulV3`。三维源码候选仍未接入。一键脚本遇到未支持的映射后跳过
-该用例的 smoke/full 候选阶段，结果标为 `tuning_unavailable`；这表示基线测试完成，
-并不表示完成了调优。
-
-算子类型相同不能证明内部 kernel、编译分支或源码版本完全相同。接入安装版
-`BatchMatMulV2` 还需要之前的源码/编译入口诊断结果；`routing.json` 会给出
-`inspection_argv`，指向刚测量的 baseline。诊断不修改系统 CANN 安装。
-如确需复现旧版跨算子比较，可显式设置
-`implementation.require_same_operator=false`；默认同算子策略保持开启。
-
-
-## BatchMatMulV2 编译策略实验
-
-安装版 `_update_config` 的取证显示，`InjectSync` 和 LICM 开关随 cache tiling 与
-L0C 输出路径变化。项目新增独立实验，只比较已观察到的 `enable_db_fold=True/False`；
-不修改同步配置，不把这个开关称为手动 tile 尺寸控制。主流程的 V2 路由仍为未适配，
-直到这项实验在目标机器验证后再决定如何接入。
-
-```bash
-/home/ma-user/anaconda3/envs/PyTorch-2.6.0/bin/python3 scripts/probe_bmmv2_strategy.py \
-  --cann-path /usr/local/Ascend/cann-8.5.0 \
-  --soc Ascend910B2 --device 0 --deps check --timeout 3600
-```
-
-默认使用二维 MatMul shape。可用 `--config examples/ascend910b_matmul_shared_rhs.json`
-或 `--config examples/ascend910b_matmul_batched_rhs.json` 选择三维形状；若实际算子不是
-`BatchMatMulV2` 则拒绝实验。脚本依次执行内置基线、默认开关配置、关闭开关配置，
-再做两轮交错确认。所有角色沿用同一个原始 ONNX 和精度标准；每次编译使用独立缓存目录。
-Roofline、Dummy Agent 的参数域记录及目标任务采样继续保留。
-
-该实验通过 ATC 子进程的 Python 启动钩子，在内存中插桩安装版动态 V2 wrapper 的
-两个 `tbe.build` 调用点。不会写入系统 CANN 源文件。它不是 CANN 官方公开的 tiling
-参数接口，能否拦截到实际加载器需要在 8.5.0 测试机确认。
-必须取得 build 调用/返回、原始源码 hash、有效 build_args 和 OM 内对应 kernel 名称
-才承认实验执行有效；没有这些证据时明确失败，不退回无效参数测试。
-
-结果在 `runs/bmmv2-strategy-*`：`summary.json`、`report.md`、`roofline.svg`。
-各构建目录的 `tbe-build.jsonl` 记录入参，`trial.json` 记录实际算子、精度、采样和证据。
-只有目标 kernel 的可读 `.o/.bin` 文件 hash 在同配置复测间稳定，且开关两组之间不同，
-并且候选耗时同时超过内置基线/默认配置的收益阈值及噪声，才接受收益。
-若没有可读代码产物或代码差异未建立，则保留基线，不能仅凭不同 OM hash 宣称收益。
-`status=passed` 表示实验完成；是否接受候选看 `confirmation.accepted`。
-终端输出是精简 JSON，可直接通过网关粘贴，无需上传源码压缩包。
+- [Agent 接口](docs/AGENT.md)：可替换本地 `propose(context)`，默认 Dummy Agent 无服务依赖。
+- [后端](docs/ADAPTER.md)：构建、正确性与 profiling。
+- [旧二维 MatMulV3](docs/OFFICIAL_MATMUL.md)：使用原 `examples/ascend910b_matmul.json`。
+- `--matmul-implementation legacy` 保留旧二维 MatMulV3 和三维 baseline-only 行为，以及同算子发现门禁。
+- `scripts/probe_bmmv2_strategy.py` 保留为独立 V2 编译策略实验，不属于当前 V3 Host tiling 流程。
+- `python -m paretopilot package --output dist/ParetoPilot.zip` 可生成源码包；测试机优先通过 GitHub 更新。

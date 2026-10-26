@@ -8,7 +8,7 @@ from .doctor import inspect_environment
 from .package import create_package
 from .profiling import inspect_profiles, read_profile
 from .roofline import analyze
-from .official import enabled as official_enabled, DEFAULT_PARAMS
+from .official import enabled as official_enabled, default_params
 from .search import run
 from .space import enumerate_space
 from .workload import baseline_only
@@ -69,7 +69,7 @@ def main(argv=None):
                     c["search"].update(population=2, generations=1, budget=1)
                     c["measurement"]["confirmation_rounds"] = 2
                     if official_enabled(c):
-                        c["space"] = {k: [v] for k, v in DEFAULT_PARAMS.items()}
+                        c["space"] = {k: [v] for k, v in default_params(c).items()}
                 if c["backend"] == "ascend" and not sys.platform.startswith("linux"):
                     raise TuningError("Ascend backend requires the Linux 910B/CANN test machine; use simulation here")
                 def progress(t, count):

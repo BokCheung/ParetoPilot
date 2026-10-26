@@ -2,10 +2,12 @@
 from pathlib import Path
 import shutil
 from .util import TuningError, digest, read_json, run_command, tree_hash, write_json
-from .official import enabled as official_enabled, build_official
+from .official import enabled as official_enabled, batch_enabled, build_official
 
 
 def op_names(config):
+    if batch_enabled(config):
+        return "ParetoPilotOfficialBatchMatMul", "batch_mat_mul_v3"
     if official_enabled(config):
         return "ParetoPilotOfficialMatMul", "mat_mul_v3"
     return ("PpMatmul", "pp_matmul") if config["operator"]["kind"] == "matmul" else ("PpAdd", "pp_add")

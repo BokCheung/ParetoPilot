@@ -1,15 +1,16 @@
 import csv
+from copy import deepcopy
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 from .build import build_candidate, op_names
-from .official import enabled as official_enabled, read_effective_tiling
+from .official import enabled as official_enabled, batch_enabled, read_effective_tiling
 from .profiling import read_profile, discover_matmul, inspect_profiles
 from .routing import same_operator
 from .roofline import analyze
-from .util import TuningError, digest, file_hash, read_json, run_command, write_json
+from .util import TuningError, digest, file_hash, read_json, run_command, write_json, tree_hash
 
 
 def environment(opp_path=None):
@@ -25,6 +26,7 @@ def environment(opp_path=None):
 class AscendBackend:
     def __init__(self, config, root):
         self.c, self.root = config, Path(root)
+        self.source_builds = {}
         self.case = self.root/"case"
         self.case.mkdir()
         write_json(self.case/"export_request.json", {"config": config, "directory": str(self.case)})
@@ -38,7 +40,16 @@ class AscendBackend:
         directory = Path(directory)
         env, build = environment(), None
         if role in ("candidate", "source_baseline"):
-            build = build_candidate(self.c, params, directory, env)
+            key = digest(params)
+            if batch_enabled(self.c) and key in self.source_builds:
+                build = deepcopy(self.source_builds[key])
+                if tree_hash(build["opp_path"]) != build["installed_sha256"]:
+                    raise TuningError("Cached BatchMatMulV3 source package changed")
+                write_json(directory/"reused_build.json", build)
+            else:
+                build = build_candidate(self.c, params, directory, env)
+                if batch_enabled(self.c):
+                    self.source_builds[key] = deepcopy(build)
             env = environment(build["opp_path"])
             self.candidate_graph(directory/"model.onnx")
         else:
@@ -48,6 +59,12 @@ class AscendBackend:
         atc = [self.c["ascend"].get("atc", "atc"), "--framework=5", "--model="+str(directory/"model.onnx"),
                "--output="+str(directory/"model"), "--soc_version="+self.c["ascend"]["soc_version"], "--input_shape="+shapes,
                "--input_format=ND", "--log=info"] + self.c["ascend"].get("atc_extra", [])
+        if batch_enabled(self.c):
+            env = env.copy()
+            for name, key in (("compiler_cache", "ASCEND_CACHE_PATH"), ("compiler_work", "ASCEND_WORK_PATH")):
+                path = directory/name
+                path.mkdir()
+                env[key] = str(path)
         self.command(atc, directory, "atc", env)
         om = directory/"model.om"
         om_hash = file_hash(om)
@@ -56,7 +73,7 @@ class AscendBackend:
             if marker not in (directory/"atc.log").read_text(encoding="utf-8", errors="replace"):
                 raise TuningError("ATC log does not show candidate Host tiling parameter signature")
             if official_enabled(self.c):
-                build["effective_tiling"] = read_effective_tiling(directory/"atc.log", params)
+                build["effective_tiling"] = read_effective_tiling(directory/"atc.log", params, batch=batch_enabled(self.c))
             write_json(directory/"selection.json", {**build, "om_sha256": om_hash, "atc_log_sha256": file_hash(directory/"atc.log"), "marker": marker})
         write_json(directory/"runtime_request.json", {"config": self.c, "om": str(om), "case": str(self.case), "directory": str(directory)})
         self.command([sys.executable, "-m", "paretopilot.worker", "run", str(directory/"runtime_request.json")], directory, "runtime", env)
@@ -81,6 +98,10 @@ class AscendBackend:
                 expected = getattr(self, "baseline_identity", {}).get("Op Type")
                 if not expected or metrics["operator_identity"].get("Op Type") != expected:
                     raise TuningError("Candidate profiling operator differs from the measured baseline")
+        if batch_enabled(self.c):
+            expected = "BatchMatMulV2" if role == "baseline" else "BatchMatMulV3"
+            if metrics["operator_identity"].get("Op Type") != expected:
+                raise TuningError(f"Expected {expected} for {role}; inspect profile_inventory.json")
         return {"status": "ok", "mode": "ascend", **metrics, "correctness": runtime["correctness"], "om_sha256": om_hash,
                 "input_shapes": [t["shape"] for t in metadata["inputs"]], "output_shape": metadata["output_shape"],
                 "om_path": str(om), "source_dir": build["source_dir"] if build else None, "selection": build}

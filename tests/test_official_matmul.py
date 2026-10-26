@@ -279,7 +279,7 @@ add_ops_impl_target(TARGET adapters
         self.assertEqual(result["selected"], "source_baseline")
 
     def test_matmul_only_smoke_uses_original_auto_parameters(self):
-        args = test_910b.parser().parse_args(["--cann-path", "/cann", "--soc", "Ascend910B2", "--operator", "matmul", "--deps", "check"])
+        args = test_910b.parser().parse_args(["--cann-path", "/cann", "--soc", "Ascend910B2", "--operator", "matmul", "--deps", "check", "--matmul-implementation", "legacy"])
         configs = test_910b.prepare_configs(args, self.root)
         self.assertEqual(set(configs), {"matmul", "matmul-smoke"})
         config = read_json(configs["matmul-smoke"])

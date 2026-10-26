@@ -1,7 +1,7 @@
 import math
 from pathlib import Path
 from .util import TuningError, number, read_json
-from .official import KIND, enabled as official_enabled
+from .official import KIND, BATCH_KIND, batch_enabled, enabled as official_enabled
 from .workload import BASELINE_ONLY, baseline_only
 
 
@@ -20,8 +20,8 @@ def load_config(path):
         if op["kind"] not in ("matmul", "add") or op["dtype"] not in ("float16", "float32"):
             raise TuningError("V1 supports matmul/add with float16/float32")
         implementation = c.get("implementation", {"kind": "bundled"})
-        if not isinstance(implementation, dict) or implementation.get("kind") not in ("bundled", KIND, BASELINE_ONLY):
-            raise TuningError("implementation.kind must be bundled, cann_matmul_v3 or baseline_only")
+        if not isinstance(implementation, dict) or implementation.get("kind") not in ("bundled", KIND, BATCH_KIND, BASELINE_ONLY):
+            raise TuningError("implementation.kind must be bundled, cann_matmul_v3, cann_batch_matmul_v3 or baseline_only")
         if type(implementation.get("require_same_operator", True)) is not bool:
             raise TuningError("implementation.require_same_operator must be a boolean")
         baseline = baseline_only(c)
@@ -33,14 +33,14 @@ def load_config(path):
             number(op["batch"], "batch", 1, True)
             if op["batch"] > 2147483647:
                 raise TuningError("batch must fit int32")
-            if not baseline:
-                raise TuningError("3D MatMul currently requires baseline_only; candidate adapters support only 2D")
+            if not baseline and not batch_enabled(c):
+                raise TuningError("3D MatMul requires baseline_only or cann_batch_matmul_v3")
         official = official_enabled(c)
         if official and (c["backend"] != "ascend" or op["kind"] != "matmul" or op["dtype"] != "float16"):
             raise TuningError("Official MatMul currently requires Ascend FP16 MatMul")
         if official:
             number(implementation.get("build_jobs", 4), "build_jobs", 1, True)
-            if any(op[k] % 16 for k in ("m", "n", "k")):
+            if not batch_enabled(c) and any(op[k] % 16 for k in ("m", "n", "k")):
                 raise TuningError("Official MatMul acceptance currently requires M/N/K multiples of 16")
         for key in (("m", "n", "k") if op["kind"] == "matmul" else ("numel",)):
             number(op[key], key, 1, True)
@@ -56,6 +56,8 @@ def load_config(path):
         required = {"tile_m", "tile_n", "tile_k", "buffers", "block_dim"} if op["kind"] == "matmul" else {"tile_elems", "buffers", "block_dim"}
         if official:
             required = {"core_limit", "tiling_policy"}
+            if batch_enabled(c):
+                required.add("batch_strategy")
         if baseline:
             required = set()
         if set(c["space"]) != required:
@@ -63,6 +65,8 @@ def load_config(path):
         if official and (any(v > min(24, c["hardware"]["max_blocks"]) for v in c["space"]["core_limit"])
                          or any(v not in (0, 1) for v in c["space"]["tiling_policy"])):
             raise TuningError("Official MatMul: core_limit must fit the configured AI Core limit (0=auto); tiling_policy must be 0 or 1")
+        if batch_enabled(c) and any(v not in (0, 1) for v in c["space"]["batch_strategy"]):
+            raise TuningError("batch_strategy must be 0 (upstream) or 1 (common)")
         if math.prod(map(len, c["space"].values())) > 200000:
             raise TuningError("Limit discrete template space to 200000 combinations")
         s = c["search"]

@@ -1,6 +1,6 @@
 import itertools
 from .workload import baseline_only
-from .official import enabled as official_enabled
+from .official import enabled as official_enabled, batch_enabled
 
 
 def legal(p, config):
@@ -8,7 +8,8 @@ def legal(p, config):
         return False
     hw, op = config["hardware"], config["operator"]
     if official_enabled(config):
-        return (set(p) == {"core_limit", "tiling_policy"} and 0 <= p["core_limit"] <= min(24, hw["max_blocks"])
+        return (set(p) == ({"core_limit", "tiling_policy", "batch_strategy"} if batch_enabled(config) else {"core_limit", "tiling_policy"})
+                and (not batch_enabled(config) or p["batch_strategy"] in (0, 1)) and 0 <= p["core_limit"] <= min(24, hw["max_blocks"])
                 and p["tiling_policy"] in (0, 1))
     if p["buffers"] not in (1, 2) or p["block_dim"] > hw["max_blocks"]:
         return False

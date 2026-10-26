@@ -48,8 +48,10 @@ def roofline_svg(config, baseline, trials):
 def write_report(root, result):
     from .util import read_json
     config = read_json(root/"manifest.json")["config"]
-    references = [result["source_baseline"]] if "source_baseline" in result else []
-    (root/"roofline.svg").write_text(roofline_svg(config, result["baseline"], references+result["history"]), encoding="utf-8")
+    primary = result.get("primary_baseline") == "source_baseline"
+    plot_baseline = result["source_baseline"] if primary else result["baseline"]
+    references = [result["baseline"]] if primary else [result["source_baseline"]] if "source_baseline" in result else []
+    (root/"roofline.svg").write_text(roofline_svg(config, plot_baseline, references+result["history"]), encoding="utf-8")
     with (root/"trials.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream)
         writer.writerow(["generation", "status", "duration_us", "params", "error"])
@@ -63,7 +65,7 @@ Selected: **{result['selected']}**. {result['confirmation']['reason']}.
 
 Selected parameters: {result['selected_params']}.
 
-Baseline: {result['baseline']['duration_us']:.4f} us. Successful candidates: {sum(t['status']=='ok' for t in result['history'])}/{len(result['history'])}.
+Baseline{' (default source)' if primary else ''}: {plot_baseline['duration_us']:.4f} us. Successful candidates: {sum(t['status']=='ok' for t in result['history'])}/{len(result['history'])}.
 
 Metric: OM target-op Task Duration(us) median. PyTorch is the correctness reference.
 
@@ -77,7 +79,8 @@ Confirmation compares interleaved fresh baseline/candidate builds. The range thr
         text += "\nAll timings and correctness outcomes are synthetic. No hardware improvement has been measured.\n"
     if "source_baseline" in result:
         final = result["confirmation"]
-        text += (f"\nOfficial source: CANN ops-nn 8.5.0, MatMulV3; commit {result['source_baseline']['selection']['commit']}.\n"
+        source_operator = result["source_baseline"]["selection"].get("operator", "MatMulV3")
+        text += (f"\nOfficial source: CANN ops-nn 8.5.0, {source_operator}; commit {result['source_baseline']['selection']['commit']}.\n"
                  "\nThe installed stock baseline and this source build are different implementations.\n"
                  "\nConfirmation task medians (us), not build/stage wall-clock seconds:\n\n"
                  f"- Stock CANN: {final.get('baseline_us', 'unavailable')}\n"
@@ -88,6 +91,15 @@ Confirmation compares interleaved fresh baseline/candidate builds. The range thr
                  f"- Tuning gain accepted: {final.get('tuning_accepted', False)}\n"
                  "\nDefault core_limit=0 preserves device core count; tiling_policy=0 preserves upstream knowledge-bank lookup with heuristic fallback.\n"
                  "\nSource/default/candidate are rebuilt and measured in alternating order. Identical default parameters never establish tuning gain.\n")
+    if result.get("primary_baseline") == "source_baseline":
+        final = result["confirmation"]
+        text += ("\nPrimary optimization baseline: default BatchMatMulV3 from the same pinned source. "
+                 "Stock BatchMatMulV2 is a performance reference only and does not gate acceptance or become the selected source implementation.\n"
+                 f"\nPrimary V3 baseline: {final.get('primary_baseline_us', result['source_baseline']['duration_us'])} us; "
+                 f"V3 tuning speedup: {final.get('primary_speedup', 'unavailable')}x.\n"
+                 "\nHost controls: core_limit=0 keeps the physical core budget; tiling_policy=0 keeps upstream KB lookup; "
+                 "batch_strategy=0 keeps upstream automatic L1/multibatch choices, 1 keeps common tiling. "
+                 "No tile dimensions are overwritten after dependency calculation.\n")
     (root/"report.md").write_text(text, encoding="utf-8")
     rows = ''.join('<tr>'+''.join(f'<td>{html.escape(str(v))}</td>' for v in [t['generation'],t['status'],t.get('duration_us',''),t['params'],t.get('error','')])+'</tr>' for t in result['history'])
     page = '<!doctype html><meta charset="utf-8"><title>ParetoPilot</title><style>body{font:16px system-ui;margin:32px;max-width:1200px}td,th{padding:9px;border-bottom:1px solid #ddd;text-align:left}pre{white-space:pre-wrap}</style>'

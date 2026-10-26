@@ -1,6 +1,6 @@
 # 910B / CANN 8.5.0 测试机部署
 
-MatMul 默认采用官方 MatMulV3 源码，910B2 已安装依赖的直接运行命令、双基线字段和日志说明见 [官方 MatMul 调优](OFFICIAL_MATMUL.md)。
+MatMul 默认采用完整 BatchMatMulV3 源码，默认 V3 是调优基线，内置 V2 只作性能参照。三个 shape、参数和指标说明见 [BatchMatMulV3 源码调优](OFFICIAL_BATCHMATMUL.md)。旧二维 MatMulV3/三维 baseline-only 需显式添加 `--matmul-implementation legacy`。
 
 ## 一键测试（推荐）
 
@@ -48,18 +48,20 @@ python3 scripts/test_910b.py --help
 | --cann-path | 必填，安装根目录或旧布局的 latest；也接受含 latest 的 ascend-toolkit 目录 |
 | --cann-env | 可选，set_env.sh 的显式路径 |
 | --soc / --device | 必填具体 SoC；设备 ID 默认 0 |
+| --matmul-implementation batch-v3 / legacy | 默认 batch-v3，完整 BatchMatMulV3 源码；legacy 保留旧路径 |
+| --matmul-case 2d / shared_rhs / batched_rhs / 3d / all | 默认 2d；all 覆盖二维及两个三维用例 |
 | --operator all / matmul / add | 默认 all；仅执行所选算子的硬件阶段 |
 | --scope full / smoke | 默认 full；smoke 完成全部前置验证后结束，不做完整搜索 |
 | --deps install / offline / check | 默认 install；install/offline 使用独立虚拟环境，check 使用启动脚本的解释器 |
 | --wheelhouse | offline 必填；不访问包索引，wheels 必须匹配 Linux 架构和 Python ABI |
 | --venv | 安装模式的虚拟环境目录，默认项目下 .venv-910b；已有环境须匹配当前 Python 小版本 |
 | --output | 新建或空输出目录；省略时自动创建 runs/910b-随机标识 |
-| --config-dir | 配置来源目录，默认 examples；需包含 ascend910b_add.json 和 ascend910b_matmul.json |
+| --config-dir | 配置来源目录，默认 examples；按选择需包含 ascend910b_add.json 和 ascend910b_batchmatmul*.json；legacy 使用 ascend910b_matmul*.json |
 | --timeout | 每个编译/ATC/运行子进程超时秒数，默认 1800，不是整个测试套件的时限 |
 
-脚本把配置复制到本次输出的 config/，覆盖 SoC、设备、Dummy Agent 和阶段超时；不会修改原始 examples。Add smoke 取各域第一个值并固定 block_dim=1；官方 MatMul smoke 使用 core_limit=0、tiling_policy=0，full 使用原域。硬件峰值和域上限仍须按真实机器填写，示例硬件值不变成实测规格。
+脚本把配置复制到本次输出的 config/，覆盖 SoC、设备、Dummy Agent 和阶段超时；不会修改原始 examples。Add smoke 取各域第一个值并固定 block_dim=1；默认 BatchMatMulV3 smoke 使用 core_limit=0、tiling_policy=0、batch_strategy=0，full 使用原域。硬件峰值和域上限仍须按真实机器填写，示例硬件值不变成实测规格。
 
-`test-summary.json` 的 status=passed 且进程退出码 0 才表示本次范围内的验收通过。脚本拒绝模拟冒充真机、正确性失败、复测数量/顺序不符以及单元测试跳过；即使底层 run 返回 0，也会额外检查全部交错复测。候选没有足够收益而选择 baseline 不影响流程通过。完整搜索允许个别非法/失败候选，但至少一个候选和优胜者的全部复测必须成功。
+`test-summary.json` 的 status=passed 且进程退出码 0 才表示本次范围内的验收通过。脚本拒绝模拟冒充真机、正确性失败、复测数量/顺序不符以及单元测试跳过；即使底层 run 返回 0，也会额外检查全部交错复测。默认 BatchMatMulV3 候选没有足够收益时选择 source_baseline，不影响流程通过；V2 仅作性能参照。完整搜索允许个别非法/失败候选，但至少一个候选和优胜者的全部复测必须成功。
 
 失败退出码为 2；中断为 130。每阶段都有独立 .log，状态文件记录命令及退出码。成功或失败后自动生成 diagnostics.zip，包含配置、阶段日志、JSON/CSV 和报告；不包含虚拟环境、生成工程、OPP 二进制、OM 和输入张量。完整产物仍在原目录。失败后可按日志修正配置，换新输出目录重跑，不覆盖已有试验，不自动续跑。脚本不保存整个进程环境，避免把环境中的凭据写入诊断包。
 
@@ -100,7 +102,7 @@ python -m pip install --no-index --find-links /path/to/wheels \
 
 ## 2. 修改配置
 
-先用 examples/ascend910b_add.json，再用 examples/ascend910b_matmul.json。
+Add 使用 examples/ascend910b_add.json；当前源码调优使用 examples/ascend910b_batchmatmul*.json。
 
 - ascend.soc_version：按 npu-smi 的实际芯片型号设置，示例 Ascend910B2 不代表所有 910B。
 - ascend.device：可用设备 ID。
@@ -108,7 +110,7 @@ python -m pip install --no-index --find-links /path/to/wheels \
 - hardware.max_blocks：Add 对应 Vector 核数，MatMul 对应 Cube 核数。Host 端还会查询实际资源进行拒绝校验。
 - hardware.peak_flops / bandwidth_bytes_s：必须与对应算子执行单元、FP16、稠密/稀疏口径匹配。示例值仅用于演示 Roofline。
 - hardware.local_memory_bytes：控制器粗筛预算，不等同于 MatMul 各级 L0/L1/UB 总容量。最终由 CANN Tiling API 检验。
-- measurement.selectors：profiling 的精确任务筛选；基线示例使用 Add / BatchMatMulV2，Add 候选使用 PpAdd，官方 MatMul 默认源码与候选均使用 MatMulV3。MatMul 基线类型依据 910B / CANN 8.5.0 测试机的实际 CSV；其他环境导出名称不同应先查 CSV 再调整。
+- measurement.selectors：profiling 的精确任务筛选；基线示例使用 Add / BatchMatMulV2，Add 候选使用 PpAdd，默认 BatchMatMulV3 源码与候选均使用 BatchMatMulV3（旧 MatMulV3 路线仍为 MatMulV3）。MatMul 基线类型依据 910B / CANN 8.5.0 测试机的实际 CSV；其他环境导出名称不同应先查 CSV 再调整。
 - measurement.timeout_s：每个编译、ATC 或运行进程的超时，默认 900 秒。
 - search.budget：仅搜索候选数量，不含基线和最终复测。失败候选也计数。
 
@@ -119,7 +121,7 @@ python -m paretopilot doctor --config examples/ascend910b_add.json --output envi
 python -m paretopilot validate --config examples/ascend910b_add.json
 python -m paretopilot baseline --config examples/ascend910b_add.json --output runs/add-baseline
 python -m paretopilot run --config examples/ascend910b_add.json --output runs/add-smoke --smoke
-python -m paretopilot run --config examples/ascend910b_matmul.json --output runs/matmul-smoke --smoke
+python -m paretopilot run --config examples/ascend910b_batchmatmul.json --output runs/matmul-smoke --smoke
 ```
 
 doctor 只检查软件依赖、Toolkit 版本文件并展示 npu-smi；仍须核对实际 SoC。版本无法读取时，设置 ASCEND_HOME_PATH 指向已加载的 8.5.0 Toolkit 根目录，其中应存在 version.info 或架构目录下的 ascend_toolkit_install.info。真实运行也会执行并保存同一环境检查。
@@ -193,7 +195,9 @@ python3 scripts/test_910b.py --cann-path /usr/local/Ascend/cann-8.5.0 --soc Asce
 本地验证不包含昇腾编译、实际 OPP 装载、设备正确性和加速收益。保留首次真机 smoke 的完整目录，可直接定位失败阶段，不需要 Agent 服务。
 
 
-## 3D MatMul baseline cases
+## 3D MatMul baseline cases (legacy)
+
+These instructions require `--matmul-implementation legacy`. For the current source-baseline route, see [BatchMatMulV3](OFFICIAL_BATCHMATMUL.md).
 
 Keep the existing 2D tuning pipeline and run both 3D baseline cases with:
 
@@ -228,7 +232,9 @@ ambiguous, inspect `profile_inventory.json` or use
 different tasks to satisfy the required sample count.
 
 
-## Discover the lowered operator before tuning
+## Discover the lowered operator before tuning (legacy)
+
+These instructions require `--matmul-implementation legacy`. For the current source-baseline route, see [BatchMatMulV3](OFFICIAL_BATCHMATMUL.md).
 
 Ascend MatMul defaults to the same-operator policy. Run the existing acceptance
 command with `--operator matmul --matmul-case all --scope smoke --deps check` to

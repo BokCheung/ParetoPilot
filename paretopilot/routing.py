@@ -1,11 +1,11 @@
 """Route measured GE operators to existing source adapters, without substitution."""
-from .official import enabled as official_enabled, COMMIT
+from .official import enabled as official_enabled, batch_enabled, COMMIT
 from .workload import baseline_only
 from .util import TuningError
 
 
 def same_operator(config):
-    return (config["backend"] == "ascend" and config["operator"]["kind"] == "matmul"
+    return (config["backend"] == "ascend" and config["operator"]["kind"] == "matmul" and not batch_enabled(config)
             and config.get("implementation", {}).get("require_same_operator", True))
 
 

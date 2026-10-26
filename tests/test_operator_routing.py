@@ -91,7 +91,7 @@ class OperatorRoutingTests(unittest.TestCase):
         self.assertFalse((out/"source_baseline").exists())
 
     def test_suite_stops_after_one_baseline_when_adapter_is_unavailable(self):
-        args = script.parser().parse_args(["--cann-path", "/opt/cann", "--soc", "Ascend910B2", "--operator", "matmul", "--deps", "check"])
+        args = script.parser().parse_args(["--cann-path", "/opt/cann", "--soc", "Ascend910B2", "--operator", "matmul", "--deps", "check", "--matmul-implementation", "legacy"])
         configs = script.prepare_configs(args, self.root)
         session = script.Session(self.root, args)
         stages = []

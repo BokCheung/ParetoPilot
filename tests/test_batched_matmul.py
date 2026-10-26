@@ -93,7 +93,7 @@ class BatchedMatmulTests(unittest.TestCase):
         for scope in ("smoke", "full"):
             output = self.root/scope
             args = script.parser().parse_args(["--cann-path", "/opt/cann", "--soc", "Ascend910B2",
-                "--operator", "matmul", "--matmul-case", "3d", "--scope", scope, "--deps", "check"])
+                "--operator", "matmul", "--matmul-implementation", "legacy", "--matmul-case", "3d", "--scope", scope, "--deps", "check"])
             configs = script.prepare_configs(args, output)
             names = ["matmul-shared-rhs", "matmul-batched-rhs"]
             self.assertEqual(set(configs), set(names))
@@ -161,7 +161,7 @@ class BatchedMatmulTests(unittest.TestCase):
             self.assertEqual(result["output_shape"], output)
 
     def test_all_cases_keep_existing_2d_smoke_configuration(self):
-        args = script.parser().parse_args(["--cann-path", "/opt/cann", "--soc", "Ascend910B2", "--matmul-case", "all"])
+        args = script.parser().parse_args(["--cann-path", "/opt/cann", "--soc", "Ascend910B2", "--matmul-case", "all", "--matmul-implementation", "legacy"])
         configs = script.prepare_configs(args, self.root)
         self.assertEqual(set(configs), {"add", "add-smoke", "matmul", "matmul-smoke", "matmul-shared-rhs", "matmul-batched-rhs"})
         self.assertEqual(read_json(configs["matmul-smoke"])["space"], {"core_limit": [0], "tiling_policy": [0]})

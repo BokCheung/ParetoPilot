@@ -15,15 +15,27 @@ from .util import TuningError, digest, file_hash, read_json, run_command, tree_h
 
 COMMIT = "9f8a66e795ef1842c2118cf5bbadfe3624bdd1ef"
 KIND = "cann_matmul_v3"
+BATCH_KIND = "cann_batch_matmul_v3"
 DEFAULT_PARAMS = {"core_limit": 0, "tiling_policy": 0}
+BATCH_DEFAULT_PARAMS = {**DEFAULT_PARAMS, "batch_strategy": 0}
 VENDOR = Path(__file__).parent/"vendor/cann_8_5_0"
 HOST = "matmul/mat_mul_v3/op_host/op_tiling/matmul_v3_base_tiling.cpp"
 INFER = "matmul/mat_mul_v3/op_host/mat_mul_v3_infershape.cpp"
 IMPL_CMAKE = "cmake/gen_ops_info.cmake"
+BATCH_HOST = "matmul/batch_mat_mul_v3/op_host/op_tiling/batch_mat_mul_v3_base_tiling.cpp"
+BATCH_INFER = "matmul/batch_mat_mul_v3/op_host/batch_mat_mul_v3_infershape.cpp"
 
 
 def enabled(config):
-    return config.get("implementation", {}).get("kind") == KIND
+    return config.get("implementation", {}).get("kind") in (KIND, BATCH_KIND)
+
+
+def batch_enabled(config):
+    return config.get("implementation", {}).get("kind") == BATCH_KIND
+
+
+def default_params(config):
+    return (BATCH_DEFAULT_PARAMS if batch_enabled(config) else DEFAULT_PARAMS).copy()
 
 
 def legacy_library(env):
@@ -43,9 +55,10 @@ def legacy_library(env):
     raise TuningError("Official MatMul requires CANN 8.5.0 ops libophost_comm_legacy.so under ASCEND_OPP_PATH/built-in/op_impl/ai_core/tbe/op_host/lib/linux/<arch>; check the installed 910B ops package")
 
 
-def validate_params(params):
-    if (set(params) != set(DEFAULT_PARAMS) or any(type(v) is not int for v in params.values())
-            or not 0 <= params["core_limit"] <= 24 or params["tiling_policy"] not in (0, 1)):
+def validate_params(params, batch=False):
+    if (set(params) != set(BATCH_DEFAULT_PARAMS if batch else DEFAULT_PARAMS) or any(type(v) is not int for v in params.values())
+            or not 0 <= params["core_limit"] <= 24 or params["tiling_policy"] not in (0, 1)
+            or (batch and params["batch_strategy"] not in (0, 1))):
         raise TuningError("Official MatMul requires core_limit=0..24 and tiling_policy=0 (upstream) or 1 (heuristic)")
 
 
@@ -72,9 +85,9 @@ def extract(archive, destination):
                 path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def materialize(project, params):
+def materialize(project, params, *, batch=False):
     """Extract verified originals and record every adaptation with before/after hashes."""
-    validate_params(params)
+    validate_params(params, batch=batch)
     manifest = verify_bundle()
     project = Path(project)
     project.mkdir(parents=True, exist_ok=False)
@@ -156,21 +169,52 @@ namespace ops {""")
     header = "#pragma once\n" + ''.join(f"#define PP_{k.upper()} {v}\n" for k, v in sorted(params.items()))
     header += f'#define PP_PARAMS_HASH "{digest(params)}"\n#define PP_SOURCE_COMMIT "{COMMIT}"\n'
     (project/HOST).with_name("paretopilot_params.h").write_text(header, encoding="utf-8")
+    if batch:
+        replace(BATCH_INFER, "} // namespace", """static ge::graphStatus InferDataTypeForBatchMatMulV3(gert::InferDataTypeContext* context)
+{
+    return context->SetOutputDataType(0, context->GetInputDataType(0));
+}
+} // namespace""")
+        replace(BATCH_INFER, ".InferShapeRange(InferShapeRangeForBatchMatMulV3);",
+                ".InferShapeRange(InferShapeRangeForBatchMatMulV3)\n    .InferDataType(InferDataTypeForBatchMatMulV3);")
+        replace(BATCH_HOST, '#include "batch_mat_mul_v3_base_tiling.h"',
+                '#include "batch_mat_mul_v3_base_tiling.h"\n#include "paretopilot_params.h"\n#include <cstdio>')
+        # Keep the default algorithm intact. The alternative keeps upstream
+        # common tiling and excludes L1-full-load/multibatch specialization.
+        replace(BATCH_HOST, "    DoL1FullLoadTiling();", "    if (PP_BATCH_STRATEGY == 0) { DoL1FullLoadTiling(); }")
+        replace(BATCH_HOST, "    if (compileInfo_.supportL0c2out && tilingSelect_ != TilingCalcSelect::COMMON &&",
+                "    if (PP_BATCH_STRATEGY == 0 && compileInfo_.supportL0c2out && tilingSelect_ != TilingCalcSelect::COMMON &&")
+        replace(BATCH_HOST, "    workspaces[0] = workspaceSize_;", """    workspaces[0] = workspaceSize_;
+    const auto &ppTiling = bmmTilingData_.matmulTiling.matmulTiling;
+    std::fprintf(stderr, "PARETOPILOT_PARAMS=%s\\nPARETOPILOT_OFFICIAL=%s\\n", PP_PARAMS_HASH, PP_SOURCE_COMMIT);
+    std::fprintf(stderr, "PARETOPILOT_BATCH_TILING={\\\"core_limit\\\":%d,\\\"tiling_policy\\\":%d,\\\"batch_strategy\\\":%d,\\\"used_core_num\\\":%u,\\\"base_m\\\":%u,\\\"base_n\\\":%u,\\\"base_k\\\":%u,\\\"tiling_key\\\":%llu,\\\"block_dim\\\":%llu,\\\"batch_count\\\":%llu,\\\"multi_batch\\\":%d,\\\"load_mode\\\":%d}\\n",
+        PP_CORE_LIMIT, PP_TILING_POLICY, PP_BATCH_STRATEGY, ppTiling.usedCoreNum,
+        ppTiling.baseM, ppTiling.baseN, ppTiling.baseK,
+        static_cast<unsigned long long>(tilingKey_), static_cast<unsigned long long>(compileInfo_.aicNum),
+        static_cast<unsigned long long>(batchInfo_.batchC),
+        static_cast<int>(tilingEnable_.tilingEnableMultiBatch), static_cast<int>(tilingEnable_.tilingEnableLoadMode));""")
+        (project/BATCH_HOST).with_name("paretopilot_params.h").write_text(header, encoding="utf-8")
     adapter = Path(__file__).parent/"official_adapter"
     for name in ("parser.cpp", "parser.cmake"):
-        shutil.copyfile(adapter/name, project/name)
+        shutil.copyfile(adapter/("batch_parser.cpp" if batch and name == "parser.cpp" else name), project/name)
     replace("CMakeLists.txt", "install(DIRECTORY ${OPS_ADV_ACT}/",
             "# ParetoPilot ATC parser integration.\ninclude(parser.cmake)\n\ninstall(DIRECTORY ${OPS_ADV_ACT}/")
-    return {"repository": manifest["repository"], "commit": COMMIT, "operator": "MatMulV3",
+    return {"repository": manifest["repository"], "commit": COMMIT, "operator": "BatchMatMulV3" if batch else "MatMulV3",
             "archives": manifest["archives"], "params": params, "params_sha256": digest(params),
             "patches": changes, "generated_source_sha256": tree_hash(project),
-            "device_source_sha256": tree_hash(project/"matmul/mat_mul_v3/op_kernel")}
+            "device_dependency_sha256": tree_hash(project/"matmul/mat_mul_v3/op_kernel"),
+            "device_source_sha256": tree_hash(project/("matmul/batch_mat_mul_v3/op_kernel" if batch else "matmul/mat_mul_v3/op_kernel"))}
 
 
-def generated_implementations(build):
+def generated_implementations(build, batch=False):
     dynamic = Path(build)/"tbe/dynamic"
     if not (dynamic/"mat_mul_v3.py").is_file():
         raise TuningError(f"Official MatMul Python adapter was not generated: {dynamic/'mat_mul_v3.py'}; see generate.log")
+    if batch:
+        adapter = dynamic/"batch_mat_mul_v3.py"
+        text = adapter.read_text(encoding="utf-8") if adapter.is_file() else ""
+        if "batch_mat_mul_v3.cpp" not in text or "batch_mat_mul_v3_apt.cpp" in text:
+            raise TuningError("910B BatchMatMulV3 adapter missing or selects an _apt.cpp entry; inspect generate.log")
     return sorted(dynamic.glob("*.py"))
 
 
@@ -191,9 +235,10 @@ def verify_installed_implementations(generated, vendor):
 
 
 def build_official(config, params, directory, env):
+    batch = batch_enabled(config)
     legacy, legacy_relative = legacy_library(env)
     project = directory/"project"
-    provenance = materialize(project, params)
+    provenance = materialize(project, params, batch=batch)
     write_json(directory/"source_manifest.json", provenance)
     write_json(directory/"params.json", params)
     timeout = config["measurement"]["timeout_s"]
@@ -202,7 +247,7 @@ def build_official(config, params, directory, env):
     commands = [
         ("configure", ["cmake", "-S", str(project), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
                        "-DENABLE_CUSTOM=ON", "-DENABLE_PACKAGE=ON", "-DENABLE_BINARY=OFF",
-                       "-DASCEND_COMPUTE_UNIT=ascend910b", "-DASCEND_OP_NAME=mat_mul_v3",
+                       "-DASCEND_COMPUTE_UNIT=ascend910b", "-DASCEND_OP_NAME="+("batch_mat_mul_v3" if batch else "mat_mul_v3"),
                        "-DASCEND_COMPILE_OPS=mat_mul_v3;batch_mat_mul_v3;matmul.common", "-DVENDOR_NAME=paretopilot"]),
         ("generate", ["cmake", "--build", str(build), "--target", "ascendc_impl_gen", "--parallel", jobs]),
         ("build", ["cmake", "--build", str(build), "--target", "package", "paretopilot_onnx", "--parallel", jobs]),
@@ -211,7 +256,7 @@ def build_official(config, params, directory, env):
         record = run_command(command, project, directory/f"{name}.log", timeout, env)
         write_json(directory/f"{name}.command.json", record)
         if name == "generate":
-            implementations = generated_implementations(build)
+            implementations = generated_implementations(build, batch=batch)
     packages = sorted((project/"build_out").glob("*.run"))
     if len(packages) != 1:
         raise TuningError(f"Expected one official custom OPP package, found {packages}; see build.log")
@@ -230,7 +275,7 @@ def build_official(config, params, directory, env):
     parser = vendors[0]/"framework/onnx"
     parser.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(build/"libparetopilot_onnx.so", parser/"libparetopilot_onnx.so")
-    result = {**provenance, "implementation": KIND, "op_type": "MatMulV3", "opp_path": str(vendors[0]),
+    result = {**provenance, "implementation": BATCH_KIND if batch else KIND, "op_type": provenance["operator"], "opp_path": str(vendors[0]),
               "source_dir": str(project), "package": str(packages[0]), "installed_sha256": tree_hash(vendors[0]),
               "python_implementations": implementation_hashes,
               "legacy_library": str(legacy), "legacy_library_sha256": file_hash(legacy_copy)}
@@ -238,21 +283,29 @@ def build_official(config, params, directory, env):
     return result
 
 
-def read_effective_tiling(log, params):
+def read_effective_tiling(log, params, batch=False):
     text = Path(log).read_text(encoding="utf-8", errors="replace")
     if f"PARETOPILOT_OFFICIAL={COMMIT}" not in text:
         raise TuningError("ATC did not execute the pinned official MatMul Host tiler")
     try:
-        records = [json.loads(m) for m in re.findall(r"PARETOPILOT_TILING=(\{[^\r\n]*\})", text)]
+        prefix = "PARETOPILOT_BATCH_TILING" if batch else "PARETOPILOT_TILING"
+        records = [json.loads(m) for m in re.findall(prefix+r"=(\{[^\r\n]*\})", text)]
     except ValueError as exc:
         raise TuningError("Invalid official MatMul effective tiling JSON") from exc
     if not records:
         raise TuningError("Official MatMul effective tiling record missing in ATC log")
     for record in records:
-        if not isinstance(record, dict) or not {"core_limit", "tiling_policy", "used_core_num", "base_m", "base_n", "base_k", "tiling_key"} <= record.keys():
+        if not isinstance(record, dict) or not {"core_limit", "tiling_policy", "used_core_num", "base_m", "base_n", "base_k", "tiling_key", *params} <= record.keys():
             raise TuningError("Incomplete official MatMul effective tiling record")
         if any(record[k] != v for k, v in params.items()) or any(record[k] <= 0 for k in ("used_core_num", "base_m", "base_n", "base_k")):
             raise TuningError("Official MatMul effective tiling does not match requested parameters")
         if params["core_limit"] and record["used_core_num"] > params["core_limit"]:
             raise TuningError("Official MatMul exceeded the requested core budget")
+        if batch:
+            if not {"batch_strategy", "block_dim", "batch_count", "multi_batch", "load_mode"} <= record.keys():
+                raise TuningError("Incomplete BatchMatMulV3 effective tiling record")
+            if record["block_dim"] <= 0 or record["batch_count"] <= 0 or (params["core_limit"] and record["block_dim"] > params["core_limit"]):
+                raise TuningError("Invalid BatchMatMulV3 block/batch count")
+            if params["batch_strategy"] == 1 and (record["multi_batch"] != 0 or record["load_mode"] != 0):
+                raise TuningError("BatchMatMulV3 common strategy was not applied")
     return records
