@@ -36,12 +36,17 @@ def inspect_environment(config):
     for command in commands:
         path = shutil.which(command)
         add(command, path is not None, path or "Not on PATH; source CANN set_env.sh and install development tools")
+    import_timeout = config["measurement"]["timeout_s"]
     for module in ("numpy", "torch", "onnx", "acl"):
         try:
             result = subprocess.run([sys.executable, "-c", f"import {module}; print(getattr({module}, '__version__', 'import OK'))"],
-                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=import_timeout)
             add(module, result.returncode == 0, (result.stdout+result.stderr).strip()[-1500:])
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired:
+            add(module, False, f"Import timed out after {import_timeout} seconds using {sys.executable}. "
+                "This does not establish a missing dependency. Increase measurement.timeout_s "
+                "(scripts/test_910b.py: --timeout), or inspect the import in this environment.")
+        except OSError as exc:
             add(module, False, str(exc))
     version_files = []
     for name in ("ASCEND_HOME_PATH", "ASCEND_TOOLKIT_HOME"):
@@ -62,5 +67,6 @@ def inspect_environment(config):
         except (OSError, subprocess.TimeoutExpired) as exc:
             info = str(exc)
     return {"ready": all(x["passed"] for x in checks), "backend": "ascend", "checks": checks,
+            "import_timeout_s": import_timeout,
             "configured_soc": a["soc_version"], "configured_cann": a["cann_version"], "npu_smi": info,
             "note": "Check the configured SoC against npu-smi. Software checks do not prove a kernel compiles or runs."}

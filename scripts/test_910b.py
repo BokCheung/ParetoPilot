@@ -53,7 +53,7 @@ def parser():
     p.add_argument("--venv", type=Path, default=ROOT/".venv-910b", help="Reusable venv for install/offline; must match this Python version")
     p.add_argument("--output", type=Path, help="New or empty directory; default creates runs/910b-<unique-id>")
     p.add_argument("--config-dir", type=Path, default=ROOT/"examples", help="Directory with ascend910b_add.json and ascend910b_matmul.json")
-    p.add_argument("--timeout", type=positive, default=1800, help="Per compiler/ATC/runtime subprocess timeout in seconds")
+    p.add_argument("--timeout", type=positive, default=1800, help="Per compiler/ATC/runtime subprocess and doctor dependency-import timeout in seconds")
     return p
 
 
