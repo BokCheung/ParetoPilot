@@ -127,3 +127,37 @@ MatMul 任务、恰好 `repeats` 个样本；有多个目标或未知类型时�
 `inspection_argv`，指向刚测量的 baseline。诊断不修改系统 CANN 安装。
 如确需复现旧版跨算子比较，可显式设置
 `implementation.require_same_operator=false`；默认同算子策略保持开启。
+
+
+## BatchMatMulV2 编译策略实验
+
+安装版 `_update_config` 的取证显示，`InjectSync` 和 LICM 开关随 cache tiling 与
+L0C 输出路径变化。项目新增独立实验，只比较已观察到的 `enable_db_fold=True/False`；
+不修改同步配置，不把这个开关称为手动 tile 尺寸控制。主流程的 V2 路由仍为未适配，
+直到这项实验在目标机器验证后再决定如何接入。
+
+```bash
+/home/ma-user/anaconda3/envs/PyTorch-2.6.0/bin/python3 scripts/probe_bmmv2_strategy.py \
+  --cann-path /usr/local/Ascend/cann-8.5.0 \
+  --soc Ascend910B2 --device 0 --deps check --timeout 3600
+```
+
+默认使用二维 MatMul shape。可用 `--config examples/ascend910b_matmul_shared_rhs.json`
+或 `--config examples/ascend910b_matmul_batched_rhs.json` 选择三维形状；若实际算子不是
+`BatchMatMulV2` 则拒绝实验。脚本依次执行内置基线、默认开关配置、关闭开关配置，
+再做两轮交错确认。所有角色沿用同一个原始 ONNX 和精度标准；每次编译使用独立缓存目录。
+Roofline、Dummy Agent 的参数域记录及目标任务采样继续保留。
+
+该实验通过 ATC 子进程的 Python 启动钩子，在内存中插桩安装版动态 V2 wrapper 的
+两个 `tbe.build` 调用点。不会写入系统 CANN 源文件。它不是 CANN 官方公开的 tiling
+参数接口，能否拦截到实际加载器需要在 8.5.0 测试机确认。
+必须取得 build 调用/返回、原始源码 hash、有效 build_args 和 OM 内对应 kernel 名称
+才承认实验执行有效；没有这些证据时明确失败，不退回无效参数测试。
+
+结果在 `runs/bmmv2-strategy-*`：`summary.json`、`report.md`、`roofline.svg`。
+各构建目录的 `tbe-build.jsonl` 记录入参，`trial.json` 记录实际算子、精度、采样和证据。
+只有目标 kernel 的可读 `.o/.bin` 文件 hash 在同配置复测间稳定，且开关两组之间不同，
+并且候选耗时同时超过内置基线/默认配置的收益阈值及噪声，才接受收益。
+若没有可读代码产物或代码差异未建立，则保留基线，不能仅凭不同 OM hash 宣称收益。
+`status=passed` 表示实验完成；是否接受候选看 `confirmation.accepted`。
+终端输出是精简 JSON，可直接通过网关粘贴，无需上传源码压缩包。

@@ -361,7 +361,7 @@ def diagnostics(root, excluded=()):
                              and not (directory/d).is_symlink() and (directory/d).resolve() not in excluded)
             for name in sorted(files):
                 path = directory/name
-                if not path.is_symlink() and path.suffix.lower() in {".log", ".json", ".csv", ".md", ".html", ".svg", ".txt"}:
+                if not path.is_symlink() and path.suffix.lower() in {".log", ".json", ".jsonl", ".csv", ".md", ".html", ".svg", ".txt"}:
                     out.write(path, path.relative_to(root).as_posix())
     return archive
 
