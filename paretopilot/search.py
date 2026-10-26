@@ -45,6 +45,7 @@ def confirmation_roles(config, round_index):
 
 def confirmation(config, winner, backend, root):
     trials = []
+    backend = getattr(backend, "om_backend", backend)
     if winner:
         for i in range(config["measurement"]["confirmation_rounds"]):
             for role in confirmation_roles(config, i):
@@ -128,123 +129,133 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
         write_json(root/"environment.json", environment)
         if not environment["ready"]:
             raise TuningError(f"Environment checks failed; see {root/'environment.json'} and run doctor")
-    backend = AscendBackend(config, root) if config["backend"] == "ascend" else SimulationBackend(config, root)
-    if smoke and batch_enabled(config) and not baseline_only:
-        source = evaluate(backend, config, default_params(config), root/"source_baseline", "source_baseline")
-        if source["status"] != "ok":
-            raise TuningError(f"BatchMatMulV3 smoke failed: {source['error']}")
-        result = {"mode": config["backend"], "status": "smoke_passed", "scope": "source_smoke",
-                  "primary_baseline": "source_baseline", "source_baseline": source,
-                  "selected": "source_baseline", "tuning_accepted": False,
-                  "reason": "Source compile, correctness and profiling verified; performance gain not evaluated",
-                  "report": str(root/"report.html")}
-        write_json(root/"summary.json", result)
-        write_baseline_report(root, config, source)
-        return result
-    baseline = evaluate(backend, config, {}, root/"baseline", "baseline")
-    if baseline["status"] != "ok":
-        raise TuningError(f"Baseline failed: {baseline['error']}")
-    source_baseline = None
-    if batch_enabled(config):
-        source_baseline = evaluate(backend, config, default_params(config), root/"source_baseline", "source_baseline")
-        if source_baseline["status"] != "ok":
-            raise TuningError(f"BatchMatMulV3 source baseline failed: {source_baseline['error']}")
-        write_json(root/"reference-policy.json", {"primary_baseline": "source_baseline", "primary_operator": "BatchMatMulV3",
-                   "stock_reference_operator": "BatchMatMulV2", "stock_is_selection_candidate": False})
-        if baseline_only:
-            write_json(root/"baseline_summary.json", source_baseline)
-            write_json(root/"stock_reference.json", baseline)
-            write_baseline_report(root, config, source_baseline)
-            return {"mode": config["backend"], "primary_baseline": "source_baseline", "baseline_us": source_baseline["duration_us"],
-                    "stock_reference_us": baseline["duration_us"], "report": str(root/"report.html")}
-    routing = None
-    if same_operator(config):
-        routing = route(config, baseline)
-        if routing["operator_identity"].get("Op Type") == "BatchMatMulV2" and not routing["tuning_supported"]:
-            routing["inspection_argv"] = [sys.executable, str(Path(__file__).resolve().parents[1]/"scripts/inspect_cann_operator.py"),
-                                          "--baseline-dir", str(root/"baseline"), "--cann-path", os.environ.get("ASCEND_HOME_PATH") or os.environ.get("ASCEND_TOOLKIT_HOME") or "<CANN_PATH>", "--no-strace"]
-        if not routing["tuning_supported"]:
-            baseline["roofline"]["suggested_priority"] = []
-            write_json(root/"baseline/trial.json", baseline)
-        write_json(root/"routing.json", routing)
-    if baseline_only or (routing and not routing["tuning_supported"]):
-        write_json(root/"baseline_summary.json", baseline)
-        write_baseline_report(root, config, baseline)
-        result = {"mode": config["backend"], "baseline_us": baseline["duration_us"], "report": str(root/"report.html")}
+    from .direct_build import enabled as kernel_enabled
+    if kernel_enabled(config):
+        from .direct_backend import KernelBackend
+        backend = KernelBackend(config, root)
+    else:
+        backend = AscendBackend(config, root) if config["backend"] == "ascend" else SimulationBackend(config, root)
+    try:
+        if smoke and batch_enabled(config) and not baseline_only:
+            source = evaluate(backend, config, default_params(config), root/"source_baseline", "source_baseline")
+            if source["status"] != "ok":
+                raise TuningError(f"BatchMatMulV3 smoke failed: {source['error']}")
+            result = {"mode": config["backend"], "status": "smoke_passed", "scope": "source_smoke",
+                      "primary_baseline": "source_baseline", "source_baseline": source,
+                      "selected": "source_baseline", "tuning_accepted": False,
+                      "reason": "Source compile, correctness and timing verified; performance gain not evaluated",
+                      "report": str(root/"report.html")}
+            write_json(root/"summary.json", result)
+            write_baseline_report(root, config, source)
+            return result
+        baseline = evaluate(backend, config, {}, root/"baseline", "baseline")
+        if baseline["status"] != "ok":
+            raise TuningError(f"Baseline failed: {baseline['error']}")
+        source_baseline = None
+        if batch_enabled(config):
+            source_baseline = evaluate(backend, config, default_params(config), root/"source_baseline", "source_baseline")
+            if source_baseline["status"] != "ok":
+                raise TuningError(f"BatchMatMulV3 source baseline failed: {source_baseline['error']}")
+            write_json(root/"reference-policy.json", {"primary_baseline": "source_baseline", "primary_operator": "BatchMatMulV3",
+                       "stock_reference_operator": "BatchMatMulV2", "stock_is_selection_candidate": False})
+            if baseline_only:
+                write_json(root/"baseline_summary.json", source_baseline)
+                write_json(root/"stock_reference.json", baseline)
+                write_baseline_report(root, config, source_baseline)
+                return {"mode": config["backend"], "primary_baseline": "source_baseline", "baseline_us": source_baseline["duration_us"],
+                        "stock_reference_us": baseline["duration_us"], "report": str(root/"report.html")}
+        routing = None
+        if same_operator(config):
+            routing = route(config, baseline)
+            if routing["operator_identity"].get("Op Type") == "BatchMatMulV2" and not routing["tuning_supported"]:
+                routing["inspection_argv"] = [sys.executable, str(Path(__file__).resolve().parents[1]/"scripts/inspect_cann_operator.py"),
+                                              "--baseline-dir", str(root/"baseline"), "--cann-path", os.environ.get("ASCEND_HOME_PATH") or os.environ.get("ASCEND_TOOLKIT_HOME") or "<CANN_PATH>", "--no-strace"]
+            if not routing["tuning_supported"]:
+                baseline["roofline"]["suggested_priority"] = []
+                write_json(root/"baseline/trial.json", baseline)
+            write_json(root/"routing.json", routing)
+        if baseline_only or (routing and not routing["tuning_supported"]):
+            write_json(root/"baseline_summary.json", baseline)
+            write_baseline_report(root, config, baseline)
+            result = {"mode": config["backend"], "baseline_us": baseline["duration_us"], "report": str(root/"report.html")}
+            if routing:
+                result.update(tuning_supported=routing["tuning_supported"], operator_identity=routing["operator_identity"], reason=routing["reason"])
+                write_json(root/"summary.json", {**result, "status": "baseline_only", "baseline": baseline, "routing": routing, "selected": "baseline"})
+            return result
         if routing:
-            result.update(tuning_supported=routing["tuning_supported"], operator_identity=routing["operator_identity"], reason=routing["reason"])
-            write_json(root/"summary.json", {**result, "status": "baseline_only", "baseline": baseline, "routing": routing, "selected": "baseline"})
-        return result
-    if routing:
-        environment = inspect_environment(config)
-        write_json(root/"candidate_environment.json", environment)
-        if not environment["ready"]:
-            raise TuningError(f"Matched source adapter environment checks failed; see {root/'candidate_environment.json'}")
-    if official_enabled(config) and source_baseline is None:
-        source_baseline = evaluate(backend, config, default_params(config), root/"source_baseline", "source_baseline")
-        check_identity(config, baseline, source_baseline)
-        if source_baseline["status"] != "ok":
-            raise TuningError(f"Official source baseline failed: {source_baseline['error']}")
-    agent = load_agent(config["agent"])
-    rng = random.Random(config["search"]["seed"])
-    history, decisions, seen, population = [], [], set(), []
-    for generation in range(config["search"]["generations"]):
-        ranked = sorted((t for t in history if t["status"] == "ok"), key=lambda t: t["duration_us"])
-        context = {"schema_version": 1, "generation": generation, "operator": config["operator"], "hardware": config["hardware"],
-                   "original_space": config["space"], "baseline": source_baseline or baseline, "best": ranked[0] if ranked else None,
-                   "roofline": ranked[0]["roofline"] if ranked else (source_baseline or baseline)["roofline"], "history": history}
-        if routing:
-            context["source_adapter"] = routing
-        if source_baseline:
-            context["stock_baseline"] = baseline
-        # A local plugin cannot mutate controller state through its input.
-        proposal = validate_proposal(agent.propose(deepcopy(context)), config["space"])
-        pool = enumerate_space(config, proposal["space"])
-        if not pool:
-            raise TuningError("Agent proposal contains no legal candidates")
-        write_json(root/f"agent/{generation:03d}.input.json", context)
-        write_json(root/f"agent/{generation:03d}.output.json", proposal)
-        decisions.append(proposal)
-        population = next_population(config, ranked, pool, seen, proposal, rng)
-        fresh = [p for p in population if digest(p) not in seen]
-        if not fresh:
-            break
-        for p in fresh:
+            environment = inspect_environment(config)
+            write_json(root/"candidate_environment.json", environment)
+            if not environment["ready"]:
+                raise TuningError(f"Matched source adapter environment checks failed; see {root/'candidate_environment.json'}")
+        if official_enabled(config) and source_baseline is None:
+            source_baseline = evaluate(backend, config, default_params(config), root/"source_baseline", "source_baseline")
+            check_identity(config, baseline, source_baseline)
+            if source_baseline["status"] != "ok":
+                raise TuningError(f"Official source baseline failed: {source_baseline['error']}")
+        agent = load_agent(config["agent"])
+        rng = random.Random(config["search"]["seed"])
+        history, decisions, seen, population = [], [], set(), []
+        for generation in range(config["search"]["generations"]):
+            ranked = sorted((t for t in history if t["status"] == "ok"), key=lambda t: t["duration_us"])
+            context = {"schema_version": 1, "generation": generation, "operator": config["operator"], "hardware": config["hardware"],
+                       "original_space": config["space"], "baseline": source_baseline or baseline, "best": ranked[0] if ranked else None,
+                       "roofline": ranked[0]["roofline"] if ranked else (source_baseline or baseline)["roofline"], "history": history}
+            if routing:
+                context["source_adapter"] = routing
+            if source_baseline:
+                context["stock_baseline"] = baseline
+            # A local plugin cannot mutate controller state through its input.
+            proposal = validate_proposal(agent.propose(deepcopy(context)), config["space"])
+            pool = enumerate_space(config, proposal["space"])
+            if not pool:
+                raise TuningError("Agent proposal contains no legal candidates")
+            write_json(root/f"agent/{generation:03d}.input.json", context)
+            write_json(root/f"agent/{generation:03d}.output.json", proposal)
+            decisions.append(proposal)
+            population = next_population(config, ranked, pool, seen, proposal, rng)
+            fresh = [p for p in population if digest(p) not in seen]
+            if not fresh:
+                break
+            for p in fresh:
+                if len(seen) >= config["search"]["budget"]:
+                    break
+                trial = evaluate(backend, config, p, root/f"trials/{len(seen):05d}", "candidate")
+                try:
+                    check_identity(config, baseline, trial)
+                except TuningError as exc:
+                    trial.update(status="failed", error=str(exc))
+                    write_json(root/f"trials/{len(seen):05d}/trial.json", trial)
+                trial["generation"] = generation
+                seen.add(digest(p))
+                history.append(trial)
+                write_json(root/"history.json", history)
+                if progress:
+                    progress(trial, len(seen))
             if len(seen) >= config["search"]["budget"]:
                 break
-            trial = evaluate(backend, config, p, root/f"trials/{len(seen):05d}", "candidate")
-            try:
-                check_identity(config, baseline, trial)
-            except TuningError as exc:
-                trial.update(status="failed", error=str(exc))
-                write_json(root/f"trials/{len(seen):05d}/trial.json", trial)
-            trial["generation"] = generation
-            seen.add(digest(p))
-            history.append(trial)
-            write_json(root/"history.json", history)
-            if progress:
-                progress(trial, len(seen))
-        if len(seen) >= config["search"]["budget"]:
-            break
-    ranked = sorted((t for t in history if t["status"] == "ok"), key=lambda t: t["duration_us"])
-    winner = ranked[0] if ranked else None
-    final = confirmation(config, winner, backend, root)
-    selected = final.get("selected", "candidate" if final["accepted"] else "baseline")
-    result = {"mode": config["backend"], "agent": config["agent"], "baseline": baseline, "winner": winner,
-              "confirmation": final, "selected": selected,
-              "selected_params": winner["params"] if selected == "candidate" else default_params(config) if selected == "source_baseline" else None,
-              "history": history, "agent_decisions": decisions}
-    if routing:
-        result["routing"] = routing
-    if source_baseline:
-        result["source_baseline"] = source_baseline
-    if batch_enabled(config):
-        result.update(primary_baseline="source_baseline", stock_reference_role="baseline")
-    write_json(root/"summary.json", result)
-    write_json(root/"best_params.json", {"selected": result["selected"], "params": result["selected_params"]})
-    write_report(root, result)
-    summary = {"mode": result["mode"], "selected": result["selected"], "evaluations": len(history), "successful_candidates": len(ranked), "accepted": final["accepted"], "report": str(root/"report.html")}
-    if batch_enabled(config):
-        summary.update(primary_baseline="BatchMatMulV3 source defaults", stock_reference="BatchMatMulV2",
-                       reason=final["reason"])
-    return summary
+        ranked = sorted((t for t in history if t["status"] == "ok"), key=lambda t: t["duration_us"])
+        winner = ranked[0] if ranked else None
+        final = confirmation(config, winner, backend, root)
+        selected = final.get("selected", "candidate" if final["accepted"] else "baseline")
+        result = {"mode": config["backend"], "agent": config["agent"], "baseline": baseline, "winner": winner,
+                  "confirmation": final, "selected": selected,
+                  "selected_params": winner["params"] if selected == "candidate" else default_params(config) if selected == "source_baseline" else None,
+                  "history": history, "agent_decisions": decisions}
+        if routing:
+            result["routing"] = routing
+        if source_baseline:
+            result["source_baseline"] = source_baseline
+        if batch_enabled(config):
+            result.update(primary_baseline="source_baseline", stock_reference_role="baseline")
+        write_json(root/"summary.json", result)
+        write_json(root/"best_params.json", {"selected": result["selected"], "params": result["selected_params"]})
+        write_report(root, result)
+        summary = {"mode": result["mode"], "selected": result["selected"], "evaluations": len(history), "successful_candidates": len(ranked), "accepted": final["accepted"], "report": str(root/"report.html")}
+        if batch_enabled(config):
+            summary.update(primary_baseline="BatchMatMulV3 source defaults", stock_reference="BatchMatMulV2",
+                           reason=final["reason"])
+        return summary
+    finally:
+        close = getattr(backend, "close", None)
+        if callable(close):
+            close()

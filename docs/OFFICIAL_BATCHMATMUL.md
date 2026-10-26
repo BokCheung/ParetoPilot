@@ -106,3 +106,10 @@ primary_baseline 字段明确标记 source_baseline。
 
 当前本机只有 CPU 测试与 mock 验证，不能证明 910B2 上编译和数值路径已验收；上板结果以各用例
 ATC/构建日志、correctness.json、profiling CSV 与有效 tiling 记录为准。
+
+## 可选 kernel 直调后端
+
+`--execution kernel` 在搜索阶段通过常驻进程调用官方 Host tiling、直接启动已编译的 kernel 入口，
+最终确认继续使用 ATC/OM。首次需编译 FP16/ND 模板分支和原生计时桥接；后续参数/shape 复用缓存。
+直调的 duration_us 是设备 Event 区间 P50，不能与 OM 的 Task Duration(us) 直接比较。
+默认仍是 OM 后端；完整使用方法和上板验证命令见 [Kernel 直调](KERNEL_DIRECT.md)。

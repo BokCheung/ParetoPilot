@@ -105,7 +105,7 @@ class AscendBackend:
             expected = "BatchMatMulV2" if role == "baseline" else "BatchMatMulV3"
             if metrics["operator_identity"].get("Op Type") != expected:
                 raise TuningError(f"Expected {expected} for {role}; inspect profile_inventory.json")
-        return {"status": "ok", "mode": "ascend", **metrics, "correctness": runtime["correctness"], "om_sha256": om_hash,
+        return {"status": "ok", "mode": "ascend", "execution": "om", "timing_method": "task_duration_us", **metrics, "correctness": runtime["correctness"], "om_sha256": om_hash,
                 "input_shapes": [t["shape"] for t in metadata["inputs"]], "output_shape": metadata["output_shape"],
                 "om_path": str(om), "source_dir": build["source_dir"] if build else None, "selection": build}
 

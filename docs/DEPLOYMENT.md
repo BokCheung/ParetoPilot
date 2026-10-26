@@ -258,3 +258,9 @@ not establish identical internal kernels or source revisions.
 `profile_inventory.json` remains available when automatic discovery fails.
 Ambiguous MatMul nodes, duplicate exports or an incorrect sample count are errors;
 no fallback selects the fastest row or adds unrelated task times together.
+
+## Kernel 直调搜索
+
+默认 OM 路径保持可用。单独开启直调可加 `--matmul-execution kernel`（一键脚本），
+或 `--execution kernel`（`python3 -m paretopilot run`）。直调烟测不调用 ATC；完整寻优最终仍有 OM 确认。
+首次构建及三用例测试步骤见 [Kernel 直调](KERNEL_DIRECT.md)。

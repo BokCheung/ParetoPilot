@@ -47,6 +47,7 @@ def parser():
     p.add_argument("--device", type=nonnegative, default=0)
     p.add_argument("--operator", choices=("all", "matmul", "add"), default="all", help="Select hardware acceptance stages")
     p.add_argument("--matmul-implementation", choices=("batch-v3", "legacy"), default="batch-v3", help="Default: BatchMatMulV3 source baseline and Host tiling; legacy retains earlier MatMulV3/baseline-only cases")
+    p.add_argument("--matmul-execution", choices=("om", "kernel"), default="om", help="Kernel: persistent direct V3 search, fresh OM confirmation; batch-v3 only")
     p.add_argument("--matmul-case", choices=("2d", "shared_rhs", "batched_rhs", "3d", "all"), default="2d", help="Choose 2D/3D workloads; batch-v3 tunes all cases, legacy 3D cases are baseline-only")
     p.add_argument("--scope", choices=("smoke", "full"), default="full", help="Batch-v3 smoke checks source compile/correctness/profile only; full adds tests, references, search and confirmation")
     p.add_argument("--deps", choices=("install", "offline", "check"), default="install", help="install/offline use an isolated venv; check uses this interpreter without installing dependencies")
@@ -204,6 +205,8 @@ def prepare_configs(args, output):
     configs = {}
     for kind, filename in workload_cases(args):
         config = load_config(args.config_dir/filename)
+        if args.matmul_execution == "kernel" and kind.startswith("matmul") and not batch_enabled(config):
+            raise TuningError("--matmul-execution kernel requires --matmul-implementation batch-v3")
         if config["backend"] != "ascend" or config["operator"]["kind"] != kind.split("-")[0]:
             raise TuningError(f"{kind} input config must describe the matching Ascend operator")
         config["ascend"].update(soc_version=args.soc, device=args.device)
@@ -217,6 +220,7 @@ def prepare_configs(args, output):
             continue
         if batch_enabled(config):
             config["implementation"]["build_cache"] = not args.no_build_cache
+            config["implementation"]["execution"] = args.matmul_execution
             if args.build_cache:
                 config["implementation"]["cache_dir"] = str(args.build_cache.expanduser().resolve())
         smoke = deepcopy(config)
@@ -295,6 +299,7 @@ def verify_result(directory, smoke):
             raise TuningError(f"{directory.name}: invalid BatchMatMulV3 source smoke evidence")
         return {"status": "passed", "scope": "source_smoke", "selected": "source_baseline",
                 "reason": result["reason"], "report": str(directory/"report.html"),
+                "timing_method": trial.get("timing_method", "task_duration_us"),
                 "task_metrics": {"source_baseline_us": trial["duration_us"], "tuning_accepted": False},
                 "cache_hit": selection.get("cache_hit", False)}
     if result.get("routing", {}).get("tuning_supported") is False:
@@ -319,6 +324,12 @@ def verify_result(directory, smoke):
         if any(t.get("selection", {}).get("commit") != COMMIT or not t.get("selection", {}).get("effective_tiling") for t in source_trials):
             raise TuningError(f"{directory.name}: official source identity/effective tiling evidence missing")
     if batch_enabled(config):
+        if config["implementation"].get("execution") == "kernel":
+            if (any(t.get("execution") != "kernel" or t.get("timing_method") != "device_event_us"
+                    for t in [result["source_baseline"], *good])
+                    or any(t.get("execution") != "om" or t.get("timing_method") != "task_duration_us"
+                           for t in confirmation)):
+                raise TuningError(f"{directory.name}: kernel search and independent OM confirmation evidence required")
         if result.get("primary_baseline") != "source_baseline" or result.get("selected") not in ("candidate", "source_baseline"):
             raise TuningError(f"{directory.name}: BatchMatMulV3 primary-baseline policy violated")
         all_trials = [result["baseline"], result["source_baseline"], *good, *confirmation]

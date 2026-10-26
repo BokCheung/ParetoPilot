@@ -298,6 +298,11 @@ def _build_official(config, params, directory, env, *, runtime=False):
               "parameter_binding": "atc_process_environment" if runtime else "compiled_header",
               "isolated_legacy_library": str(legacy_copy),
               "legacy_library": str(legacy), "legacy_library_sha256": file_hash(legacy_copy)}
+    if config["implementation"].get("execution") == "kernel":
+        if not batch or not runtime:
+            raise TuningError("Kernel execution requires the runtime-parameter BatchMatMulV3 build cache")
+        from .direct_build import build_kernels
+        result = build_kernels(config, result, directory, env)
     write_json(directory/"build_manifest.json", result)
     return result
 

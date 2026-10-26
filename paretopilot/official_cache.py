@@ -53,7 +53,7 @@ struct RuntimeParams {
             && Read("PARETOPILOT_BATCH_STRATEGY", 1, batch_strategy);
     }
 };
-inline const RuntimeParams &Params() { static const RuntimeParams params; return params; }
+inline RuntimeParams Params() { return RuntimeParams(); }
 }
 #define PP_CORE_LIMIT (paretopilot::Params().core_limit)
 #define PP_TILING_POLICY (paretopilot::Params().tiling_policy)
@@ -66,7 +66,8 @@ inline const RuntimeParams &Params() { static const RuntimeParams params; return
 def cache_identity(config, env):
     manifest = official.verify_bundle()
     legacy, _ = official.legacy_library(env)
-    paths = [Path(__file__), Path(official.__file__), *sorted((Path(__file__).parent/"official_adapter").glob("*"))]
+    paths = [Path(__file__), Path(official.__file__), Path(__file__).with_name("direct_build.py"),
+             *sorted((Path(__file__).parent/"official_adapter").glob("*"))]
     tools = {}
     for name in ("cmake", "g++"):
         path = shutil.which(name, path=env.get("PATH"))
@@ -79,7 +80,7 @@ def cache_identity(config, env):
         for path in [Path(root)/"version.info", *Path(root).glob("*/ascend_toolkit_install.info")]:
             if path.is_file():
                 versions[str(path)] = file_hash(path)
-    return {"format": 1, "kind": official.BATCH_KIND, "archives": manifest["archives"],
+    return {"format": 2, "kind": official.BATCH_KIND, "execution": config["implementation"].get("execution", "om"), "archives": manifest["archives"],
             "soc": config["ascend"]["soc_version"], "cann": config["ascend"]["cann_version"],
             "machine": platform.machine(), "python": sys.executable, "python_version": sys.version,
             "environment_paths": roots, "versions": versions, "legacy_sha256": file_hash(legacy),
@@ -123,6 +124,15 @@ def build_lock(path, timeout):
 
 def valid_snapshot(result, entry):
     try:
+        if result.get("kernel_catalogs"):
+            launcher = Path(result["launcher_library"])
+            if not launcher.resolve().is_relative_to(entry.resolve()) or file_hash(launcher) != result["launcher_sha256"]:
+                return False
+        for catalog in result.get("kernel_catalogs", []):
+            for name in ("metadata", "binary"):
+                if (not Path(catalog[name]).resolve().is_relative_to(entry.resolve())
+                        or file_hash(catalog[name]) != catalog[name+"_sha256"]):
+                    return False
         opp = Path(result["opp_path"])
         legacy = Path(result["isolated_legacy_library"])
         return (result.get("parameter_binding") == "atc_process_environment"
@@ -149,7 +159,9 @@ def cached_build(config, params, directory, env):
         if (entry/"complete.json").is_file():
             try:
                 existing = read_json(entry/"complete.json")
-                if isinstance(existing, dict) and existing.get("cache_identity") == identity and valid_snapshot(existing, entry):
+                if (isinstance(existing, dict) and existing.get("cache_identity") == identity
+                        and (identity.get("execution") != "kernel" or existing.get("kernel_catalogs"))
+                        and valid_snapshot(existing, entry)):
                     result, cache_hit = existing, True
             except TuningError:
                 pass

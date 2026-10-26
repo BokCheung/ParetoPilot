@@ -91,3 +91,10 @@ python -m unittest discover -s tests -v
 - `--matmul-implementation legacy` 保留旧二维 MatMulV3 和三维 baseline-only 行为，以及同算子发现门禁。
 - `scripts/probe_bmmv2_strategy.py` 保留为独立 V2 编译策略实验，不属于当前 V3 Host tiling 流程。
 - `python -m paretopilot package --output dist/ParetoPilot.zip` 可生成源码包；测试机优先通过 GitHub 更新。
+
+## Kernel 直调寻优（可选）
+
+可使用 `python3 -m paretopilot run --execution kernel --config examples/ascend910b_batchmatmul.json --output runs/kernel-tune`。
+首次编译官方 FP16/ND kernel 变体；搜索阶段由常驻进程调用官方 Host tiling 并直接执行 kernel，无需逐候选 ATC。
+直调使用设备 Event 区间 P50，最终收益仍由 ATC/OM profiling 复测确认，两种计时分别标记。
+当前完成 CPU/ABI mock 验证，910B2 实际编译与运行需要上板 smoke 确认。三个 shape 的命令、编译边界和日志见 [Kernel 直调](docs/KERNEL_DIRECT.md)。

@@ -8,7 +8,7 @@ from .doctor import inspect_environment
 from .package import create_package
 from .profiling import inspect_profiles, read_profile
 from .roofline import analyze
-from .official import enabled as official_enabled, default_params
+from .official import enabled as official_enabled, batch_enabled, default_params
 from .search import run
 from .space import enumerate_space
 from .workload import baseline_only
@@ -24,6 +24,7 @@ def parser():
         cmd.add_argument("--config", required=True)
         if name in ("baseline", "run"):
             cmd.add_argument("--output", required=True, help="New empty experiment directory")
+            cmd.add_argument("--execution", choices=("om", "kernel"), help="Kernel: direct BatchMatMulV3 search, fresh OM confirmation")
             cmd.add_argument("--smoke", action="store_true", help="BatchMatMulV3: one source correctness/profile check; other adapters: one candidate and two confirmation rounds")
         if name == "doctor":
             cmd.add_argument("--output", help="Optional JSON environment record")
@@ -65,6 +66,13 @@ def main(argv=None):
                 result = read_profile(args.csv, m["selectors"][args.role], m["repeats"], m.get("duration_column", "Task Duration(us)"), m.get("traffic_column"))
                 result["roofline"] = analyze(c, result["duration_us"], result["measured_bytes"])
             else:
+                if args.execution:
+                    if args.execution == "kernel" and (not batch_enabled(c)
+                                                       or not c["implementation"].get("build_cache", True)):
+                        raise TuningError("--execution kernel requires BatchMatMulV3 and build_cache=true")
+                    c["implementation"]["execution"] = args.execution
+                if c.get("implementation", {}).get("execution") == "kernel" and args.command == "baseline":
+                    raise TuningError("Use run --smoke --execution kernel for a direct source baseline")
                 if args.smoke:
                     c["search"].update(population=2, generations=1, budget=1)
                     c["measurement"]["confirmation_rounds"] = 2

@@ -26,6 +26,12 @@ def load_config(path):
             raise TuningError("implementation.require_same_operator must be a boolean")
         if type(implementation.get("build_cache", True)) is not bool:
             raise TuningError("implementation.build_cache must be a boolean")
+        execution = implementation.get("execution", "om")
+        if execution not in ("om", "kernel"):
+            raise TuningError("implementation.execution must be om or kernel")
+        if execution == "kernel" and (implementation["kind"] != "cann_batch_matmul_v3"
+                                      or c["backend"] != "ascend" or not implementation.get("build_cache", True)):
+            raise TuningError("Kernel execution requires Ascend BatchMatMulV3 and build_cache=true")
         if "cache_dir" in implementation:
             if not isinstance(implementation["cache_dir"], str) or not implementation["cache_dir"]:
                 raise TuningError("implementation.cache_dir must be a nonempty path")
