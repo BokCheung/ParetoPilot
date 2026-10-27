@@ -162,6 +162,7 @@ class DirectKernelTests(unittest.TestCase):
         self.assertEqual(len(result["kernel_catalogs"]), 1)
         self.assertEqual(result["binary_soc"], "Ascend910B2")
         self.assertIn('"Ascend910B2"', env_script.read_text())
+        self.assertNotIn(b'\r', env_script.read_bytes())
 
     def test_persistent_launcher_changes_parameters_without_atc_for_all_shapes(self):
         import numpy as np

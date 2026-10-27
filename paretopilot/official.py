@@ -85,6 +85,21 @@ def extract(archive, destination):
                 path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+def normalize_shell_scripts(project):
+    """Adapt extracted Shell scripts without decoding or changing archives."""
+    changes = []
+    root = Path(project)
+    for path in sorted(root.rglob("*.sh")):
+        original = path.read_bytes()
+        normalized = original.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        if normalized != original:
+            before = file_hash(path)
+            path.write_bytes(normalized)
+            changes.append({"path": path.relative_to(root).as_posix(), "before_sha256": before,
+                            "after_sha256": file_hash(path), "reason": "shell_line_endings_lf"})
+    return changes
+
+
 def materialize(project, params, *, batch=False, runtime=False):
     """Extract verified originals and record every adaptation with before/after hashes."""
     validate_params(params, batch=batch)
@@ -95,7 +110,7 @@ def materialize(project, params, *, batch=False, runtime=False):
     project.mkdir(parents=True, exist_ok=False)
     for name in manifest["archives"]:
         extract(VENDOR/name, project)
-    changes = []
+    changes = normalize_shell_scripts(project)
 
     def replace(path, old, new):
         file = project/path

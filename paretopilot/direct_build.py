@@ -38,7 +38,7 @@ def build_kernels(config, result, directory, env):
     marker = '[Ascend910B]="Ascend910B1"'
     if text.count(marker) != 1:
         raise TuningError("Official binary SoC map changed; refusing an unverified target")
-    script.write_text(text.replace(marker, '[Ascend910B]="'+soc+'"'), encoding="utf-8")
+    script.write_text(text.replace(marker, '[Ascend910B]="'+soc+'"'), encoding="utf-8", newline="\n")
     result["binary_soc"] = soc
     build = project/"build"
     commands = [

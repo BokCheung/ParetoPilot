@@ -48,16 +48,41 @@ class OfficialMatmulTests(unittest.TestCase):
             self.assertIn("third_party/json/LICENSE.MIT", z.namelist())
             self.assertIn("third_party/makeself/COPYING", z.namelist())
 
+    def test_shell_normalization_preserves_bytes_permissions_and_source_chain(self):
+        project = self.root/"shell-fixture"
+        project.mkdir()
+        main = project/"main.sh"
+        helper = project/"helper.sh"
+        main.write_bytes(b'#!/bin/bash\r\nsource ./helper.sh\r\nrun_test\r\n')
+        helper.write_bytes(b'run_test() {\r\n  printf "shell-ok\\n"\r\n}\r\n')
+        main.chmod(0o755)
+        mode = main.stat().st_mode
+        records = official.normalize_shell_scripts(project)
+        self.assertEqual({r["path"] for r in records}, {"main.sh", "helper.sh"})
+        self.assertEqual(main.stat().st_mode, mode)
+        self.assertEqual(main.read_bytes(), b'#!/bin/bash\nsource ./helper.sh\nrun_test\n')
+        self.assertNotIn(b'\r', helper.read_bytes())
+        self.assertEqual(official.normalize_shell_scripts(project), [])
+        if os.name != "nt":
+            result = subprocess.run(["bash", str(main)], cwd=project, capture_output=True, text=True, timeout=10, check=True)
+            self.assertEqual(result.stdout, "shell-ok\n")
+
     def test_materialization_preserves_official_kernel_and_limits_source_patches(self):
         project = self.root/"project"
         provenance = official.materialize(project, {"core_limit": 12, "tiling_policy": 1})
         changed = set()
         with zipfile.ZipFile(official.VENDOR/"ops-nn-matmul.zip") as z:
+            shell_changes = {n for n in z.namelist() if n.endswith('.sh') and b'\r' in z.read(n)}
             for n in z.namelist():
                 if not n.endswith('/') and (project/n).read_bytes() != z.read(n):
                     changed.add(n)
         self.assertEqual(changed, {official.HOST, official.INFER, official.IMPL_CMAKE, "CMakeLists.txt", "common/CMakeLists.txt",
-                                  "cmake/third_party/nlohmann_json.cmake", "cmake/third_party/makeself-fetch.cmake"})
+                                  "cmake/third_party/nlohmann_json.cmake", "cmake/third_party/makeself-fetch.cmake"} | shell_changes)
+        records = {r["path"]: r for r in provenance["patches"] if r.get("reason") == "shell_line_endings_lf"}
+        self.assertEqual(set(records), shell_changes)
+        for name in shell_changes:
+            self.assertNotIn(b'\r', (project/name).read_bytes())
+            self.assertEqual(records[name]["after_sha256"], hashlib.sha256((project/name).read_bytes()).hexdigest())
         self.assertEqual(provenance["commit"], official.COMMIT)
         host = (project/official.HOST).read_text(encoding="utf-8")
         self.assertLess(host.index("compileInfo_.aicNum = PP_CORE_LIMIT"), host.index("MatmulV3BaseTiling::DoOpTiling"))

@@ -97,6 +97,15 @@ the final confirmation still takes time; kernel search does not remove it.
 
 ## Diagnostics
 
+If an older build fails with `$'\r': command not found` or `source` cannot find a
+script whose name has an invisible carriage return, update through GitHub and
+start a new smoke run. Extracted `.sh` files are now normalized to LF before
+configuration, with before/after hashes recorded in source provenance. The SoC
+map rewrite also explicitly writes LF on Windows. Original source archives and
+Device calculation sources retain their checksum verification. The changed
+adapter fingerprint automatically selects a new cache generation; no manual
+cache deletion or CANN installation edits are needed.
+
 - `direct_prepare/cache-build-logs/kernel-build.log`: initial device compilation.
 - `direct_prepare/cache-build-logs/launcher-build.log`: native timing bridge build.
 - `direct-worker.log` and `direct_prepare/ready.json`: capabilities, initialization
