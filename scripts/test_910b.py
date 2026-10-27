@@ -57,6 +57,7 @@ def parser():
     p.add_argument("--config-dir", type=Path, default=ROOT/"examples", help="Directory with ascend910b_add.json and ascend910b_matmul.json")
     p.add_argument("--build-cache", type=Path, help="Persistent BatchMatMulV3 source package cache (default: project .cache/official-builds)")
     p.add_argument("--no-build-cache", action="store_true", help="Rebuild the source package for each parameter set")
+    p.add_argument("--fresh-search", action="store_true", help="Ignore historical tuning parameters; keep the compiled source cache")
     p.add_argument("--timeout", type=positive, default=1800, help="Per compiler/ATC/runtime subprocess and doctor dependency-import timeout in seconds")
     return p
 
@@ -219,6 +220,8 @@ def prepare_configs(args, output):
             configs[kind] = path
             continue
         if batch_enabled(config):
+            if args.fresh_search:
+                config["search"]["reuse_results"] = False
             config["implementation"]["build_cache"] = not args.no_build_cache
             config["implementation"]["execution"] = args.matmul_execution
             if args.build_cache:
@@ -350,8 +353,12 @@ def verify_result(directory, smoke):
         if result.get("primary_baseline") != "source_baseline" or result.get("selected") not in ("candidate", "source_baseline"):
             raise TuningError(f"{directory.name}: BatchMatMulV3 primary-baseline policy violated")
         all_trials = [result["baseline"], result["source_baseline"], *good, *confirmation]
+        from paretopilot.profiling import MATMUL_TYPES
+        stock_type = result["baseline"].get("operator_identity", {}).get("Op Type")
+        if stock_type not in MATMUL_TYPES:
+            raise TuningError(f"{directory.name}: stock MatMul identity missing")
         for trial in all_trials:
-            expected_op = "BatchMatMulV2" if trial.get("role") == "baseline" else "BatchMatMulV3"
+            expected_op = stock_type if trial.get("role") == "baseline" else "BatchMatMulV3"
             inputs, output = shapes(config["operator"])
             if (trial.get("operator_identity", {}).get("Op Type") != expected_op
                     or trial.get("input_shapes") != inputs or trial.get("output_shape") != output

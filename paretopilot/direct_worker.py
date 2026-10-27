@@ -106,6 +106,12 @@ def initialize_compile_platform(lib, config, directory):
             record["core_count"] = int(platform.get_soc_spec("CORE_NUM"))
             if record["compile_soc"] != record["runtime_soc"] or record["core_count"] <= 0:
                 raise TuningError("TBE compile platform does not match the selected device")
+            if config["search"].get("domain_mode") == "shape":
+                from .domains import MEMORY_KEYS
+                for key in MEMORY_KEYS:
+                    record[key] = int(platform.get_soc_spec(key))
+                    if record[key] <= 0:
+                        raise TuningError(f"Invalid CANN platform resource {key}")
             record["status"] = "ok"
     except Exception as exc:
         record.update(error=f"{type(exc).__name__}: {exc}", recent_error=recent_error(lib))
@@ -322,6 +328,7 @@ class Runtime:
                 "input_shapes": [list(a.shape) for a in self.inputs], "output_shape": list(self.reference.shape),
                 "operator_identity": {"Op Type": "BatchMatMulV3", "Op Name": kernel["entry"], "evidence": "compiled_kernel_metadata"},
                 "selection": {**self.build, "params": params, "params_sha256": digest(params),
+                              "platform_info": self.platform_info,
                               "effective_tiling": effective, "kernel": kernel, "tiling_sha256": file_hash(directory/"host_tiling.json")},
                 "seconds": time.monotonic()-started}
 

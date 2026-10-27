@@ -17,6 +17,7 @@ class ExplicitTileTests(unittest.TestCase):
     def test_domains_cover_all_three_shapes_and_search_reaches_every_combination(self):
         for suffix, count in (("", 48), ("_shared_rhs", 39), ("_batched_rhs", 18)):
             c = load_config(ROOT/f"examples/ascend910b_batchmatmul{suffix}.json")
+            c["search"]["domain_mode"] = "manual"
             pool = enumerate_space(c)
             self.assertEqual(len(pool), count)
             self.assertEqual(official.default_params(c)["base_m"], 0)

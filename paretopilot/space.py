@@ -16,9 +16,20 @@ def legal(p, config):
         if p["core_limit"] > min(24, hw["max_blocks"]):
             return False
         if p.get("base_m", 0):
+            if op["k"] > 65535 or op["n"] > 65535:
+                return False  # Current fixed-tile Host branch requires on-the-fly K/N.
             # Conservative shape filter. Real buffer limits are checked by the
             # CANN API/Host using the device platform, not Roofline estimates.
-            return p["base_m"] <= (op["m"]+15)//16*16 and p["base_n"] <= (op["n"]+15)//16*16
+            m, n = p["base_m"], p["base_n"]
+            if m > (op["m"]+15)//16*16 or n > (op["n"]+15)//16*16:
+                return False
+            limits = config["search"].get("domain_limits")
+            if limits:
+                # Necessary bounds using the smallest FP16 K block (16).
+                # These do not substitute for GetTiling's full validation.
+                return (m*n*4 <= limits["L0C_SIZE"] and m*16*2 <= limits["L0A_SIZE"]
+                        and n*16*2 <= limits["L0B_SIZE"] and 2*16*(m+n)*2 <= limits["L1_SIZE"])
+            return True
         return True
     if p["buffers"] not in (1, 2) or p["block_dim"] > hw["max_blocks"]:
         return False

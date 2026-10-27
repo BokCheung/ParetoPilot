@@ -40,3 +40,7 @@ rejection, smoke evidence and unchanged Device source hashes. Full local
 `python -m unittest discover -s tests -q`: 150 tests, 147 passed, 3 skipped.
 These checks do not establish successful CANN compilation or NPU execution of
 the new branch; the updated three-case hardware smoke remains required.
+
+# Shape-generated domains and historical parameters (2026-10-27)
+
+Automatic domains now use verified CANN SoC/core/L0/L1 evidence before Agent proposal. Tests cover changed shapes and actual capacity bounds, the OM probe, exact and nearby historical parameters, build/device/driver prerequisites, corrupted cache, fresh-search override, regression fallback, source/explicit smoke, stock operator discovery and fresh OM confirmation after an exact hit. The final full local unittest run completed 157 tests: 154 passed and 3 skipped. One earlier run encountered a Windows timeout-log cleanup sharing error; its isolated rerun and the subsequent full run passed. CANN/NPU execution of the new platform queries and adaptive flow remains to be validated on the 910B2.

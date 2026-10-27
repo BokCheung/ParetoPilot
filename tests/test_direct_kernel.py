@@ -137,7 +137,8 @@ class DirectKernelTests(unittest.TestCase):
     def platform_fixture(self):
         return SimpleNamespace(__file__="fixture/platform.py",
             set_current_compile_soc_info=Mock(return_value="success"),
-            get_soc_spec=Mock(side_effect=lambda key: {"SOC_VERSION": "Ascend910B2", "CORE_NUM": 24}[key]))
+            get_soc_spec=Mock(side_effect=lambda key: {"SOC_VERSION": "Ascend910B2", "CORE_NUM": 24,
+                "L0A_SIZE": 65536, "L0B_SIZE": 65536, "L0C_SIZE": 131072, "L1_SIZE": 524288}[key]))
 
     def test_compile_platform_uses_actual_soc_and_rejects_incomplete_initialization(self):
         native = SimpleNamespace(aclrtGetSocName=Mock(return_value=b"Ascend910B2"))

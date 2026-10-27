@@ -23,6 +23,7 @@ class SourceCacheTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.config = load_config(ROOT/"examples/ascend910b_batchmatmul.json")
+        self.config["search"]["domain_mode"] = "manual"
         self.config["implementation"]["cache_dir"] = str(self.root/"cache")
         self.params = official.BATCH_DEFAULT_PARAMS.copy()
 

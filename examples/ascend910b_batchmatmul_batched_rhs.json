@@ -54,7 +54,9 @@
     "budget": 64,
     "seed": 42,
     "mutation_rate": 0.25,
-    "min_gain": 0.03
+    "min_gain": 0.03,
+    "domain_mode": "shape",
+    "result_cache": true
   },
   "measurement": {
     "warmup": 5,

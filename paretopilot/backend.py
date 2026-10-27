@@ -89,7 +89,8 @@ class AscendBackend:
             raise TuningError("msprof produced no op_summary CSV; inspect profiler_export.log")
         m = self.c["measurement"]
         write_json(directory/"profile_inventory.json", inspect_profiles(paths))
-        if role == "baseline" and same_operator(self.c):
+        auto_reference = batch_enabled(self.c) and self.c["search"].get("domain_mode") == "shape"
+        if role == "baseline" and (same_operator(self.c) or auto_reference):
             metrics = discover_matmul(paths, m["repeats"], m.get("duration_column", "Task Duration(us)"), m.get("traffic_column"))
             identity = metrics["operator_identity"]
             if getattr(self, "baseline_identity", identity).get("Op Type") != identity.get("Op Type"):
@@ -103,7 +104,7 @@ class AscendBackend:
                     raise TuningError("Candidate profiling operator differs from the measured baseline")
         if batch_enabled(self.c):
             expected = "BatchMatMulV2" if role == "baseline" else "BatchMatMulV3"
-            if metrics["operator_identity"].get("Op Type") != expected:
+            if not (role == "baseline" and auto_reference) and metrics["operator_identity"].get("Op Type") != expected:
                 raise TuningError(f"Expected {expected} for {role}; inspect profile_inventory.json")
         return {"status": "ok", "mode": "ascend", "execution": "om", "timing_method": "task_duration_us", **metrics, "correctness": runtime["correctness"], "om_sha256": om_hash,
                 "input_shapes": [t["shape"] for t in metadata["inputs"]], "output_shape": metadata["output_shape"],

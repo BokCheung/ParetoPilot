@@ -29,6 +29,7 @@ class OfficialBatchMatmulTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.c = load_config(ROOT/"examples/ascend910b_batchmatmul.json")
+        self.c["search"]["domain_mode"] = "manual"  # This fixture isolates the original controller contracts.
         self.c["measurement"]["confirmation_rounds"] = 2
 
     def trial(self, role, params=None, time=None):

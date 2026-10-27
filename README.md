@@ -4,8 +4,8 @@
 默认 MatMul 路线使用固定版本的 **BatchMatMulV3 完整源码**建立基线，再调优同一源码的 Host tiling。
 内置 BatchMatMulV2 只作性能参照。保留 Roofline、Dummy Agent，不需要 Agent 服务或 API Key。
 
-流程：PyTorch 正确性参考与 ONNX 导出 → V2 性能参照 → 默认 V3 源码基线 → Roofline →
-Dummy Agent 参数域 → 遗传搜索 → 同源候选 → 三路交错复测 → 报告。
+流程：PyTorch 正确性参考与 ONNX 导出 → stock 性能参照 → 默认 V3 源码基线 → 真实平台与 shape 生成参数域 → Roofline →
+Dummy Agent 调整参数域 → 历史参数复测/遗传搜索 → 同源候选 → 三路交错复测 → 报告与结果缓存。
 Add 保留原有 Ascend C 模板。
 
 ## 支持范围
@@ -20,6 +20,9 @@ Add 保留原有 Ascend C 模板。
 批次广播。Host 参数包含 `core_limit`、`tiling_policy`、`batch_strategy` 和 `base_m/base_n`。
 显式分块使用官方 `SetFixSplit(M,N,-1)`，baseK 自动计算；`base_m=base_n=0` 保留官方自动策略。
 三个用例的 kernel 直调烟测均检查默认参数和一个显式分块候选，详见 [直调说明](docs/KERNEL_DIRECT.md)。
+示例默认启用 `search.domain_mode="shape"`：修改 operator 中的 shape 后自动重建参数域，无需手动修改 space。
+相同 shape 的历史最优参数先复测，相近 shape 只作预热候选；最终仍执行新的 OM 确认。
+用 `--fresh-search` 忽略历史参数并保留编译缓存；用 `search.domain_mode="manual"` 恢复静态参数域。
 Add 支持任意正整数 numel 和尾块，参数为 `tile_elems`、`buffers`、`block_dim`。
 
 官方源码与离线构建依赖已随 GitHub 仓库打包。**本地没有 CANN/NPU；源码编译、精度和性能仍需在

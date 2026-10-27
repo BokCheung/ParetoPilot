@@ -12,8 +12,9 @@ from .report import write_report, write_baseline_report
 from .workload import baseline_only as baseline_config
 from .routing import same_operator, route, check_identity
 from .space import enumerate_space, legal
+from . import domains, tuning_cache
 from .official import enabled as official_enabled, batch_enabled, default_params
-from .util import TuningError, digest, file_hash, tree_hash, write_json
+from .util import TuningError, digest, file_hash, tree_hash, write_json, read_json
 
 
 def next_population(config, ranked, pool, seen, proposal, rng):
@@ -103,6 +104,7 @@ def confirmation(config, winner, backend, root):
 
 
 def run(config, output, progress=None, baseline_only=False, smoke=False):
+    config = deepcopy(config)
     if baseline_config(config) and not baseline_only:
         raise TuningError("baseline_only workload: use the baseline command; 3D candidate tuning is not supported")
     root = Path(output).resolve()
@@ -126,6 +128,8 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
         if same_operator(config):
             preflight["implementation"] = {"kind": "baseline_only"}
         environment = inspect_environment(preflight)
+        driver = [line.strip() for line in environment.get("npu_smi", "").splitlines() if "Version" in line]
+        config["search"]["runtime_signature"] = {"driver_version_lines": driver}
         write_json(root/"environment.json", environment)
         if not environment["ready"]:
             raise TuningError(f"Environment checks failed; see {root/'environment.json'} and run doctor")
@@ -140,6 +144,7 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
             source = evaluate(backend, config, default_params(config), root/"source_baseline", "source_baseline")
             if source["status"] != "ok":
                 raise TuningError(f"BatchMatMulV3 smoke failed: {source['error']}")
+            config = domains.prepare(config, source, root, manifest)
             tile_trial = None
             tile_params = next((p for p in enumerate_space(config) if p.get("base_m", 0)), None)
             if tile_params is not None:
@@ -165,13 +170,14 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
             if source_baseline["status"] != "ok":
                 raise TuningError(f"BatchMatMulV3 source baseline failed: {source_baseline['error']}")
             write_json(root/"reference-policy.json", {"primary_baseline": "source_baseline", "primary_operator": "BatchMatMulV3",
-                       "stock_reference_operator": "BatchMatMulV2", "stock_is_selection_candidate": False})
+                       "stock_reference_operator": baseline.get("operator_identity", {}).get("Op Type"), "stock_is_selection_candidate": False})
             if baseline_only:
                 write_json(root/"baseline_summary.json", source_baseline)
                 write_json(root/"stock_reference.json", baseline)
                 write_baseline_report(root, config, source_baseline)
                 return {"mode": config["backend"], "primary_baseline": "source_baseline", "baseline_us": source_baseline["duration_us"],
                         "stock_reference_us": baseline["duration_us"], "report": str(root/"report.html")}
+            config = domains.prepare(config, source_baseline, root, manifest)
         routing = None
         if same_operator(config):
             routing = route(config, baseline)
@@ -201,6 +207,10 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
             if source_baseline["status"] != "ok":
                 raise TuningError(f"Official source baseline failed: {source_baseline['error']}")
         agent = load_agent(config["agent"])
+        cached, cache_match = (tuning_cache.lookup(config, source_baseline) if domains.enabled(config)
+                               else (None, {"status": "disabled", "reason": "manual domains"}))
+        write_json(root/"result_cache.json", cache_match)
+        reused = False
         rng = random.Random(config["search"]["seed"])
         history, decisions, seen, population = [], [], set(), []
         for generation in range(config["search"]["generations"]):
@@ -212,6 +222,9 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
                 context["source_adapter"] = routing
             if source_baseline:
                 context["stock_baseline"] = baseline
+            if domains.enabled(config):
+                context["domain_platform"] = config["search"]["domain_limits"]
+                context["cache_hint"] = {k: cache_match[k] for k in ("status", "params") if k in cache_match}
             # A local plugin cannot mutate controller state through its input.
             proposal = validate_proposal(agent.propose(deepcopy(context)), config["space"])
             pool = enumerate_space(config, proposal["space"])
@@ -221,6 +234,10 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
             write_json(root/f"agent/{generation:03d}.output.json", proposal)
             decisions.append(proposal)
             population = next_population(config, ranked, pool, seen, proposal, rng)
+            if generation == 0 and cached and cached["params"] in pool:
+                seed = cached["params"]
+                population = [seed, *(p for p in population if p != seed)][:config["search"]["population"]]
+                cache_match["seed_attempted"] = True
             fresh = [p for p in population if digest(p) not in seen]
             if not fresh:
                 break
@@ -239,16 +256,34 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
                 write_json(root/"history.json", history)
                 if progress:
                     progress(trial, len(seen))
-            if len(seen) >= config["search"]["budget"]:
+                if cached and p == cached["params"]:
+                    reused = tuning_cache.stable_retest(config, source_baseline, trial, cached, cache_match)
+                    cache_match.update(retest_status=trial["status"], search_skipped=reused,
+                                       confirmation="fresh OM confirmation is still required")
+                    write_json(root/"result_cache.json", cache_match)
+                    if reused:
+                        print("Historical parameters passed fresh retest; skipping remaining candidates", flush=True)
+                        break
+            if reused or len(seen) >= config["search"]["budget"]:
                 break
         ranked = sorted((t for t in history if t["status"] == "ok"), key=lambda t: t["duration_us"])
         winner = ranked[0] if ranked else None
+        if winner:
+            print(f"Candidate search finished: {len(history)} evaluations; starting fresh confirmation measurements", flush=True)
         final = confirmation(config, winner, backend, root)
+        if domains.enabled(config):
+            try:
+                cache_match["saved_key"] = tuning_cache.save(config, source_baseline, winner, final, root)
+            except OSError as exc:
+                cache_match["save_error"] = str(exc)
+            write_json(root/"result_cache.json", cache_match)
         selected = final.get("selected", "candidate" if final["accepted"] else "baseline")
         result = {"mode": config["backend"], "agent": config["agent"], "baseline": baseline, "winner": winner,
                   "confirmation": final, "selected": selected,
                   "selected_params": winner["params"] if selected == "candidate" else default_params(config) if selected == "source_baseline" else None,
                   "history": history, "agent_decisions": decisions}
+        if domains.enabled(config):
+            result.update(domain=read_json(root/"domain.json"), result_cache=cache_match)
         if routing:
             result["routing"] = routing
         if source_baseline:
@@ -260,7 +295,7 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
         write_report(root, result)
         summary = {"mode": result["mode"], "selected": result["selected"], "evaluations": len(history), "successful_candidates": len(ranked), "accepted": final["accepted"], "report": str(root/"report.html")}
         if batch_enabled(config):
-            summary.update(primary_baseline="BatchMatMulV3 source defaults", stock_reference="BatchMatMulV2",
+            summary.update(primary_baseline="BatchMatMulV3 source defaults", stock_reference=baseline.get("operator_identity", {}).get("Op Type"),
                            reason=final["reason"])
         return summary
     finally:

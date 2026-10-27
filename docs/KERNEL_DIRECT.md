@@ -20,8 +20,9 @@ This checks all three workloads without ATC/OM or unit/simulation tests in the
 smoke stage. The source package, device binaries and native timing bridge must
 be built on the first cache miss. That first build may take substantial time.
 Later shapes, parameter values and runs reuse the verified build. With the new
-tile domains, smoke checks both the automatic source baseline and one explicit
-baseM=16/baseN=32 candidate for each workload. See `tile_smoke/trial.json`.
+tile domains, smoke checks both the automatic source baseline and one legal
+explicit candidate from the generated domain for each workload. See its actual
+parameters in `tile_smoke/trial.json`.
 Use `--matmul-case 2d` to start with one shape.
 
 ## Candidate search without unit/simulation tests
@@ -50,16 +51,16 @@ which includes the full preflight unit/simulation suite before hardware search.
 
 ### Explicit baseM/baseN search
 
-The three example configurations add `base_m=[0,16,32,64,128]` and
-`base_n=[0,32,64,128]`. A pair of zeros keeps automatic upstream tiling. Both
+The three example configurations enable `search.domain_mode="shape"`. Their
+`space` is a preview/manual fallback; it is regenerated after the source baseline
+provides verified platform capabilities. A pair of zeros keeps automatic upstream tiling. Both
 dimensions must be nonzero for an explicit request, which requires
 `tiling_policy=1` and `batch_strategy=1`. Partial automatic/explicit pairs and
 dimensions exceeding the conservatively aligned workload shape are filtered.
-There are 48 legal combinations for 2D, 39 for shared RHS and 18 for batched RHS,
-including the existing automatic policy/core combinations. Budget=64,
-population=8 and generations=12 allow the seeded search to visit every legal
-combination with Dummy Agent retaining the domains. Failed candidates count
-toward the budget and remain visible in the report.
+Budget=64, population=8 and generations=12 limit the search. Generated domains
+may exceed the budget; the report does not claim exhaustive or globally optimal
+coverage. Failed candidates count toward the budget and remain visible.
+Set `search.domain_mode="manual"` to retain the configured static `space`.
 
 The Host calls `MultiCoreMatmulTiling::SetFixSplit(base_m, base_n, -1)` before
 `GetTiling`; baseK is always computed by the official API and is not searchable.
@@ -77,13 +78,67 @@ and `base_k_auto=true`, followed by the actual `PARETOPILOT_BATCH_TILING` record
 `trial.json` records requested parameters and effective tiling, including actual
 baseK. Direct launches still require an exact compiled tiling-key match.
 
-This Host adapter change invalidates the previous source build fingerprint.
-The first updated smoke builds one new package/binary cache; subsequent shapes
-and parameter combinations reuse it. No manual cache deletion is needed.
+Installing the explicit-tile Host adapter for the first time invalidates older
+non-tile build fingerprints. Once it is built, later shapes and parameter
+combinations reuse it. Updates limited to the shape-domain/controller logic do
+not require kernel recompilation. No manual cache deletion is needed.
 CPU tests validate contracts and mock ABI execution; the new explicit path must
 still pass the above smoke command on the 910B2 before performance conclusions.
 
 Official API: [CANN 8.5 SetFixSplit](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/850/API/ascendcopapi/atlasascendc_api_07_0681.html).
+
+### Shape domains and historical parameter cache
+
+The flow is source baseline -> verified CANN platform -> shape-generated domains
+-> Roofline and Agent proposal -> official Host validation -> measured search ->
+fresh OM confirmation -> historical parameter record. Kernel mode obtains the
+platform from its persistent worker. OM mode runs a small isolated platform probe.
+Both query the actual SoC and TBE `CORE_NUM`, `L0A_SIZE`, `L0B_SIZE`, `L0C_SIZE`
+and `L1_SIZE`. Missing/mismatched resources stop automatic domain generation;
+Roofline's illustrative peak/bandwidth/buffer settings are not physical capacity
+evidence. Reference profiling discovers the stock MatMul type for each workload
+and rejects changes in that identity during confirmation.
+
+Base tile candidates include aligned powers of two through 256 and additional
+small/tail choices for dimensions <=128. M=1 produces `base_m=[0,16]`; N=100
+allows choices through 112. Core budgets include lower counts and the actual
+device budget, constrained by a conservative task bound. Necessary FP16 L0/L1
+bounds filter explicit pairs; CANN remains the final dependency validator.
+K/N beyond the current fixed-tile branch's 65535 limit retain automatic choices.
+L1-full-load and multibatch remain available to automatic candidates, with their
+existing fixed-tile restrictions unchanged. Dummy Agent retains the generated
+domains and can later be replaced by an advisor proposing subsets of them.
+
+Full runs use `.cache/tuning-results` separately from compiled source/kernel
+cache. `search.result_cache_dir` overrides its location. Keys include workload
+shapes and broadcasting, dtype/layout/transposition attributes, device/SoC/CANN,
+driver version evidence, actual platform limits, verified installed source/build
+identity, controller code, input seed, Agent and measurement settings. Without
+verified build or driver evidence, historical reuse is unavailable.
+
+- Exact hit: remeasure the historical parameters first, including correctness.
+  Only a previously OM-confirmed configuration with gain exceeding the configured
+  threshold and fresh sample range, and speedup >=90% of its historical speedup,
+  can skip remaining candidate search. OM confirmation still runs afresh.
+- Nearby shape: same environment, operator family and broadcasting, with each
+  M/N/K/batch dimension within a factor of two. A still-legal cached configuration
+  becomes an initial candidate only; all normal search and confirmation follow.
+- Invalid, incompatible, corrupted or regressed records trigger normal search.
+  The Agent can exclude any cached seed from its proposed domain.
+
+No historical timing samples substitute for a fresh measurement. Cache writes
+use unique temporary files and atomic replacement. To bypass historical hints
+while retaining compiled binaries, add `--fresh-search` to either run command
+or the acceptance script. `search.result_cache=false` disables both read/write;
+`search.reuse_results=false` disables reading while allowing a new result save.
+
+Artifacts: `domain.json`, `effective_config.json` and updated `manifest.json`
+record the generated domains and real capacities; `agent/*` records what the
+Agent received; `result_cache.json` records the hit, retest and reuse decision.
+This Python-side update preserves existing valid compiled source/kernel caches.
+Runtime domain generation and cache reuse still require hardware acceptance.
+
+Platform resource API: [CANN 8.5 get_soc_spec](https://www.hiascend.com/doc_center/source/zh/canncommercial/850/API/aicpuopapi/atlasplatform_07_0005.html).
 
 1. The pinned official Host implementation and the original Device sources are
    built offline. Upstream binary generation is restricted to the existing

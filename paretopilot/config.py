@@ -87,6 +87,17 @@ def load_config(path):
         if math.prod(map(len, c["space"].values())) > 200000:
             raise TuningError("Limit discrete template space to 200000 combinations")
         s = c["search"]
+        if s.get("domain_mode", "manual") not in ("manual", "shape"):
+            raise TuningError("search.domain_mode must be manual or shape")
+        if s.get("domain_mode") == "shape" and (not batch_enabled(c) or "base_m" not in c["space"]):
+            raise TuningError("Shape domains require BatchMatMulV3 with base_m/base_n controls")
+        for option in ("result_cache", "reuse_results"):
+            if type(s.get(option, True)) is not bool:
+                raise TuningError(f"search.{option} must be boolean")
+        if "result_cache_dir" in s:
+            if not isinstance(s["result_cache_dir"], str) or not s["result_cache_dir"]:
+                raise TuningError("search.result_cache_dir must be a nonempty path")
+            s["result_cache_dir"] = str((source.parent/Path(s["result_cache_dir"]).expanduser()).resolve())
         for key in ("population", "generations", "budget", "seed"):
             number(s[key], key, 2 if key == "population" else 0 if key == "seed" else 1, True)
         for key in ("mutation_rate", "min_gain"):

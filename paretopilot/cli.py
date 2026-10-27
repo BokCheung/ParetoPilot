@@ -25,7 +25,8 @@ def parser():
         if name in ("baseline", "run"):
             cmd.add_argument("--output", required=True, help="New empty experiment directory")
             cmd.add_argument("--execution", choices=("om", "kernel"), help="Kernel: direct BatchMatMulV3 search, fresh OM confirmation")
-            cmd.add_argument("--smoke", action="store_true", help="BatchMatMulV3: one source correctness/profile check; other adapters: one candidate and two confirmation rounds")
+            cmd.add_argument("--smoke", action="store_true", help="BatchMatMulV3: source baseline and one explicit-tile check when available; other adapters: one candidate and two confirmation rounds")
+            cmd.add_argument("--fresh-search", action="store_true", help="Ignore historical tuning parameters and perform a fresh search")
         if name == "doctor":
             cmd.add_argument("--output", help="Optional JSON environment record")
     cmd = sub.add_parser("inspect-profile", help="List exact task identifiers and counts in a CSV")
@@ -53,6 +54,8 @@ def main(argv=None):
                 if not count and not baseline_only(c):
                     raise TuningError("No legal template configurations")
                 result = {"valid": True, "backend": c["backend"], "legal_candidates": count, "agent": c["agent"]["kind"]}
+                if c["search"].get("domain_mode") == "shape":
+                    result.update(domain_mode="shape", candidate_count_basis="configured preview; regenerated after verified platform query")
             elif args.command == "doctor":
                 result = inspect_environment(c)
                 if args.output:
@@ -66,6 +69,8 @@ def main(argv=None):
                 result = read_profile(args.csv, m["selectors"][args.role], m["repeats"], m.get("duration_column", "Task Duration(us)"), m.get("traffic_column"))
                 result["roofline"] = analyze(c, result["duration_us"], result["measured_bytes"])
             else:
+                if args.fresh_search:
+                    c["search"]["reuse_results"] = False
                 if args.execution:
                     if args.execution == "kernel" and (not batch_enabled(c)
                                                        or not c["implementation"].get("build_cache", True)):

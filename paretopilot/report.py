@@ -100,8 +100,9 @@ Confirmation compares interleaved fresh baseline/candidate builds. The range thr
                  "\nSource/default/candidate are rebuilt and measured in alternating order. Identical default parameters never establish tuning gain.\n")
     if result.get("primary_baseline") == "source_baseline":
         final = result["confirmation"]
+        stock_type = result["baseline"].get("operator_identity", {}).get("Op Type", "MatMul")
         text += ("\nPrimary optimization baseline: default BatchMatMulV3 from the same pinned source. "
-                 "Stock BatchMatMulV2 is a performance reference only and does not gate acceptance or become the selected source implementation.\n"
+                 f"Stock {stock_type} is a performance reference only and does not gate acceptance or become the selected source implementation.\n"
                  f"\nPrimary V3 baseline: {final.get('primary_baseline_us', result['source_baseline']['duration_us'])} us; "
                  f"V3 tuning speedup: {final.get('primary_speedup', 'unavailable')}x.\n"
                  "\nHost controls: core_limit=0 keeps the physical core budget; tiling_policy=0 keeps upstream KB lookup; "
@@ -109,6 +110,12 @@ Confirmation compares interleaved fresh baseline/candidate builds. The range thr
                  "base_m/base_n=0 retain automatic tiles; explicit pairs use SetFixSplit(M,N,-1) with heuristic/common policy. "
                  "baseK remains automatic. "
                  "No tile dimensions are overwritten after dependency calculation.\n")
+    if "domain" in result:
+        domain, cache = result["domain"], result.get("result_cache", {})
+        text += (f"\nShape-generated domains: {domain['legal_candidates']} legal candidates; "
+                 f"budget {domain['budget']}. See domain.json and effective_config.json.\n"
+                 f"Historical parameter cache: {cache.get('status')}; search skipped after fresh retest: "
+                 f"{cache.get('search_skipped', False)}. Final acceptance uses fresh OM confirmation.\n")
     (root/"report.md").write_text(text, encoding="utf-8")
     rows = ''.join('<tr>'+''.join(f'<td>{html.escape(str(v))}</td>' for v in [t['generation'],t['status'],t.get('duration_us',''),t['params'],t.get('error','')])+'</tr>' for t in result['history'])
     page = '<!doctype html><meta charset="utf-8"><title>ParetoPilot</title><style>body{font:16px system-ui;margin:32px;max-width:1200px}td,th{padding:9px;border-bottom:1px solid #ddd;text-align:left}pre{white-space:pre-wrap}</style>'
