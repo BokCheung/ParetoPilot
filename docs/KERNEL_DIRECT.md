@@ -116,6 +116,16 @@ value is recorded in `kernel-build-environment.json` and build provenance.
 - `direct_prepare/cache-build-logs/launcher-build.log`: native timing bridge build.
 - `direct-worker.log` and `direct_prepare/ready.json`: capabilities, initialization
   and worker failures. Missing CANN symbols are explicit errors.
+- `direct_prepare/platform_init.json` and `platform_init.log`: actual runtime SoC,
+  TBE compilation SoC, core count and initialization failures. Before Host tiling,
+  the worker reads `aclrtGetSocName` and calls
+  `tbe.common.platform.set_current_compile_soc_info(soc, core_type="AiCore")`
+  once per worker. ACL device selection alone does not configure TBE's compile
+  target. A mismatched device/configuration, failed initializer or invalid TBE
+  platform stops execution. This addresses the missing initialization exposed
+  by `GetPlatformInstanceByDevice failed`; confirmation on 910B2 is still required.
+  No hardware resource constants are substituted. This worker-only change does
+  not invalidate the existing verified kernel package cache.
 - `source_baseline/` and `trials/*/host_tiling_request.json`, `host_tiling.log`,
   `host_tiling.json`: actual Host invocation, signatures and complete raw result.
 - `host_tiling_diagnostics.json`: native API return code, recent ACL error,
@@ -137,3 +147,6 @@ candidate is never replaced silently with an OM or simulated measurement.
 API references: [CANN 8.5 binary kernel execution](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/850/opdevg/Ascendcopdevg/atlas_ascendc_10_00043.html),
 [Kernel Launch](https://www.hiascend.com/document/detail/en/canncommercial/850/API/appdevgapi/aclcppdevg_03_1793.html),
 [Host tiling JSON bridge source](https://github.com/Ascend/metadef/blob/master/register/op_tiling/op_tiling_py.cc).
+
+Compilation platform API:
+[set_current_compile_soc_info](https://www.hiascend.com/doc_center/source/en/canncommercial/800/apiref/aicpuopapi/atlasplatform_07_0003.html).

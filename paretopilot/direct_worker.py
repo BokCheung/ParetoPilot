@@ -1,6 +1,7 @@
 """Persistent CANN 8.5 kernel launcher. No ATC, OM, or torch in this process."""
 from contextlib import ExitStack, contextmanager
 import ctypes as C
+import importlib
 import json
 import math
 import os
@@ -82,6 +83,38 @@ def decode_tiling(info):
         raise TuningError(f"Invalid direct Host tiling result: {exc}") from exc
 
 
+def initialize_compile_platform(lib, config, directory):
+    """ACL device selection does not configure TBE's compilation platform."""
+    record = {"status": "failed", "device": config["ascend"]["device"],
+              "configured_soc": config["ascend"]["soc_version"],
+              "api": "tbe.common.platform.set_current_compile_soc_info"}
+    path = Path(directory)/"platform_init.json"
+    try:
+        with capture_native(Path(directory)/"platform_init.log"):
+            name = bind(lib, "aclrtGetSocName", [], C.c_char_p)()
+            if not name:
+                raise TuningError("aclrtGetSocName returned no device SoC")
+            record["runtime_soc"] = name.decode("utf-8")
+            if record["runtime_soc"] != record["configured_soc"]:
+                raise TuningError(f"Device SoC {record['runtime_soc']} differs from configured {record['configured_soc']}")
+            platform = importlib.import_module("tbe.common.platform")
+            record["module"] = str(getattr(platform, "__file__", ""))
+            record["return_value"] = platform.set_current_compile_soc_info(record["runtime_soc"], core_type="AiCore")
+            if record["return_value"] != "success":
+                raise TuningError(f"TBE platform initialization returned {record['return_value']!r}")
+            record["compile_soc"] = platform.get_soc_spec("SOC_VERSION")
+            record["core_count"] = int(platform.get_soc_spec("CORE_NUM"))
+            if record["compile_soc"] != record["runtime_soc"] or record["core_count"] <= 0:
+                raise TuningError("TBE compile platform does not match the selected device")
+            record["status"] = "ok"
+    except Exception as exc:
+        record.update(error=f"{type(exc).__name__}: {exc}", recent_error=recent_error(lib))
+        raise TuningError(f"Compile platform initialization failed: {exc}; see {path} and platform_init.log") from exc
+    finally:
+        write_json(path, record)
+    return record
+
+
 class Runtime:
     def __init__(self, request):
         import numpy as np
@@ -115,6 +148,8 @@ class Runtime:
         device = self.c["ascend"]["device"]
         self.call("aclrtSetDevice", device)
         self.cleanup.callback(self.call, "aclrtResetDevice", device)
+        self.platform_info = initialize_compile_platform(
+            self.lib, self.c, Path(request.get("ready", self.case/"ready.json")).parent)
         self.stream = self.handle("aclrtCreateStream", "aclrtDestroyStream")
         self.events = [self.handle("aclrtCreateEvent", "aclrtDestroyEvent") for _ in range(2)]
         self.inputs = [np.ascontiguousarray(np.load(self.case/f"input_{i}.npy", allow_pickle=False)) for i in range(2)]
@@ -188,6 +223,7 @@ class Runtime:
                        "recent_error": error, "output_bytes": len(buffer.value),
                        "output_preview": buffer.value[:2000].decode("utf-8", errors="replace"),
                        "tiling_libraries": self.tiling_libraries, "register_library": str(self.register._name),
+                       "compile_platform": self.platform_info,
                        "pid": os.getpid(), "request": str(directory/"host_tiling_request.json")}
         write_json(directory/"host_tiling_diagnostics.json", diagnostics)
         if ret != 1:

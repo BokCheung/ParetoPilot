@@ -5,6 +5,7 @@ import json
 import io
 import os
 import subprocess
+import sys
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from paretopilot import official
 from paretopilot.config import load_config
 from paretopilot.direct_backend import KernelBackend, validate_result
 from paretopilot.direct_build import fp16_config, select_kernel, build_kernels, kernel_build_environment
-from paretopilot.direct_worker import Runtime, decode_tiling, P, capture_native, recent_error
+from paretopilot.direct_worker import Runtime, decode_tiling, P, capture_native, recent_error, initialize_compile_platform
 from paretopilot.search import confirmation
 from paretopilot.util import TuningError, digest, file_hash, read_json, tree_hash, write_json
 
@@ -87,6 +88,8 @@ class FakeNative:
                 return 1
             elif name == "aclGetRecentErrMsg":
                 return self.error_message
+            elif name == "aclrtGetSocName":
+                return b"Ascend910B2"
             return 0
         setattr(self, name, function)
         return function
@@ -127,6 +130,33 @@ class DirectKernelTests(unittest.TestCase):
         self.assertIn(b"native stdout", path.read_bytes())
         self.assertIn(b"native stderr", path.read_bytes())
         self.assertEqual(recent_error(SimpleNamespace()), "")
+
+    def platform_fixture(self):
+        return SimpleNamespace(__file__="fixture/platform.py",
+            set_current_compile_soc_info=Mock(return_value="success"),
+            get_soc_spec=Mock(side_effect=lambda key: {"SOC_VERSION": "Ascend910B2", "CORE_NUM": 24}[key]))
+
+    def test_compile_platform_uses_actual_soc_and_rejects_incomplete_initialization(self):
+        native = SimpleNamespace(aclrtGetSocName=Mock(return_value=b"Ascend910B2"))
+        platform = self.platform_fixture()
+        with patch.dict(sys.modules, {"tbe.common.platform": platform}):
+            result = initialize_compile_platform(native, self.config, self.root)
+            self.assertEqual(result["status"], "ok")
+            platform.set_current_compile_soc_info.assert_called_once_with("Ascend910B2", core_type="AiCore")
+            for bad in ("error", None):
+                platform.set_current_compile_soc_info.return_value = bad
+                with self.assertRaisesRegex(TuningError, "initialization returned"):
+                    initialize_compile_platform(native, self.config, self.root)
+                self.assertEqual(read_json(self.root/"platform_init.json")["status"], "failed")
+            platform.set_current_compile_soc_info.return_value = "success"
+            platform.get_soc_spec.side_effect = lambda key: {"SOC_VERSION": "Ascend310", "CORE_NUM": 8}[key]
+            with self.assertRaisesRegex(TuningError, "does not match"):
+                initialize_compile_platform(native, self.config, self.root)
+            native.aclrtGetSocName.return_value = b"Ascend910B1"
+            platform.set_current_compile_soc_info.reset_mock()
+            with self.assertRaisesRegex(TuningError, "differs from configured"):
+                initialize_compile_platform(native, self.config, self.root)
+            platform.set_current_compile_soc_info.assert_not_called()
 
     def test_key_lookup_rejects_missing_duplicate_and_modified_artifact(self):
         catalogs = self.catalog()
@@ -231,7 +261,9 @@ class DirectKernelTests(unittest.TestCase):
             launcher.write_bytes(b"fixture launcher")
             build.update(launcher_library=str(launcher), launcher_sha256=file_hash(launcher))
             fake = FakeNative(reference)
-            with patch("paretopilot.direct_worker.C.CDLL", return_value=fake), patch.dict(os.environ):
+            platform = self.platform_fixture()
+            with patch("paretopilot.direct_worker.C.CDLL", return_value=fake), patch.dict(os.environ), \
+                    patch.dict(sys.modules, {"tbe.common.platform": platform}):
                 runtime = Runtime({"config": config, "build": build, "case": str(case)})
                 try:
                     for index, params in enumerate((self.params, {"core_limit": 12, "tiling_policy": 1, "batch_strategy": 1})):
@@ -242,6 +274,9 @@ class DirectKernelTests(unittest.TestCase):
                         self.assertEqual(len(result["samples_us"]), 3)
                         self.assertAlmostEqual(result["duration_us"], 8, places=4)
                     self.assertEqual(fake.calls.count("aclInit"), 1)
+                    platform.set_current_compile_soc_info.assert_called_once()
+                    self.assertLess(fake.calls.index("aclrtSetDevice"), fake.calls.index("aclrtGetSocName"))
+                    self.assertLess(fake.calls.index("aclrtGetSocName"), fake.calls.index("OpTilingForCompile"))
                     self.assertEqual(fake.calls.count("aclrtBinaryLoadFromFile"), 1)
                     self.assertEqual(fake.calls.count("OpTilingForCompile"), 2)
                     fake.bad_output = True
