@@ -87,7 +87,8 @@ def confirmation(config, winner, backend, root):
         keys = ("used_core_num", "base_m", "base_n", "base_k", "tiling_key", "block_dim", "multi_batch", "load_mode")
         def signature(t):
             records = t.get("selection", {}).get("effective_tiling", [])
-            return frozenset(tuple(r.get(k) for k in keys) for r in records)
+            return frozenset((tuple(r.get(k) for k in keys),
+                              tuple(sorted((k, v) for k, v in r.get("cube_plan", {}).items() if k != "raw"))) for r in records)
         source_signatures = [signature(t) for t in trials if t["role"] == "source_baseline"]
         candidate_signatures = [signature(t) for t in trials if t["role"] == "candidate"]
         changed = (all(source_signatures) and all(candidate_signatures)

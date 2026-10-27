@@ -33,6 +33,7 @@ class FakeNative:
         self.bad_output = False
         self.tiling_failure = False
         self.error_message = b""
+        self.overwrite_plan = False
 
     def __getattr__(self, name):
         def function(*args):
@@ -81,7 +82,12 @@ class FakeNative:
                 assert os.environ["PARETOPILOT_REQUEST_HASH"] == digest(params)
                 assert json.loads(args[3])[-2:] == [None, None]
                 assert json.loads(args[5])[2]["dtype"] == "int64"
+                plan = {k: record[k] for k in ("base_m", "base_n", "base_k", "used_core_num")}
+                plan.update(raw="01020304", single_core_m=16, single_core_n=256, single_core_k=256,
+                            step_m=1, step_n=16, step_ka=1, step_kb=1, depth_a1=1, depth_b1=16)
                 message = (f"PARETOPILOT_PARAMS={digest(params)}\nPARETOPILOT_OFFICIAL={official.COMMIT}\n"
+                           "PARETOPILOT_API_CUBE_PLAN="+json.dumps(plan)+"\n"
+                           "PARETOPILOT_FINAL_CUBE_PLAN="+json.dumps({**plan, "step_n": 1} if self.overwrite_plan else plan)+"\n"
                            "PARETOPILOT_TILE_REQUEST="+json.dumps({"base_m": params.get("base_m", 0), "base_n": params.get("base_n", 0), "base_k_auto": True})+"\n"
                            "PARETOPILOT_BATCH_TILING="+json.dumps(record)+"\n")
                 os.write(2, message.encode())
@@ -271,7 +277,7 @@ class DirectKernelTests(unittest.TestCase):
                 runtime = Runtime({"config": config, "build": build, "case": str(case)})
                 try:
                     for index, params in enumerate((self.params, {"core_limit": 12, "tiling_policy": 1, "batch_strategy": 1},
-                            {"core_limit": 12, "tiling_policy": 1, "batch_strategy": 1, "base_m": 16, "base_n": 32})):
+                            {"core_limit": 12, "tiling_policy": 1, "batch_strategy": 1, "base_m": 16, "base_n": 16})):
                         directory = case/str(index)
                         directory.mkdir()
                         result = runtime.evaluate({"params": params, "directory": str(directory)})
@@ -284,6 +290,14 @@ class DirectKernelTests(unittest.TestCase):
                     self.assertLess(fake.calls.index("aclrtGetSocName"), fake.calls.index("OpTilingForCompile"))
                     self.assertEqual(fake.calls.count("aclrtBinaryLoadFromFile"), 1)
                     self.assertEqual(fake.calls.count("OpTilingForCompile"), 3)
+                    fake.overwrite_plan = True
+                    overwritten = case/"overwritten"
+                    overwritten.mkdir()
+                    launches = fake.calls.count("aclrtLaunchKernelWithConfig")
+                    with self.assertRaisesRegex(TuningError, "was overwritten"):
+                        runtime.evaluate({"params": params, "directory": str(overwritten)})
+                    self.assertEqual(fake.calls.count("aclrtLaunchKernelWithConfig"), launches)
+                    fake.overwrite_plan = False
                     fake.bad_output = True
                     bad = case/"bad"
                     bad.mkdir()

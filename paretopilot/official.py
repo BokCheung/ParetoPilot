@@ -176,7 +176,7 @@ namespace ops {""")
             "IMPL_OP_INFERSHAPE(MatMulV3)\n        .InferShape(InferShapeForMatMulV3)\n        .InferDataType(InferDataTypeForMatMulV3);")
 
     replace(HOST, '#include "matmul_v3_base_tiling.h"',
-            '#include "matmul_v3_base_tiling.h"\n#include "paretopilot_params.h"\n#include <cstdio>')
+            '#include "matmul_v3_base_tiling.h"\n#include "paretopilot_params.h"\n#include "paretopilot_cube_plan.h"\n#include <cstdio>')
     replace(HOST, "    if (compileInfo_.aicNum == 0) {", """    // ParetoPilot: change the input core budget BEFORE upstream derives tiling.
     if (PP_CORE_LIMIT > 0) {
         if (static_cast<uint64_t>(PP_CORE_LIMIT) > compileInfo_.aicNum) {
@@ -217,6 +217,7 @@ namespace ops {""")
         runInfo_.usedCoreNum = ppApi.usedCoreNum;
         // Keep the API's complete TCubeTiling; no KB/basic/split-K rewrite.
         runInfo_.needUpdate = false;
+        paretopilot::PrintCubePlan("API", ppApi);
         DoNd2NzVectorTiling();
         SetNd2NzInfo();
         return ge::GRAPH_SUCCESS;
@@ -241,6 +242,7 @@ namespace ops {""")
     }
     // ParetoPilot: change the input core budget BEFORE upstream derives tiling.""")
     (project/HOST).with_name("paretopilot_params.h").write_text(header, encoding="utf-8")
+    shutil.copyfile(Path(__file__).parent/"official_adapter/cube_plan.h", (project/HOST).with_name("paretopilot_cube_plan.h"))
     if batch:
         replace(BATCH_INFER, "} // namespace", """static ge::graphStatus InferDataTypeForBatchMatMulV3(gert::InferDataTypeContext* context)
 {
@@ -250,26 +252,35 @@ namespace ops {""")
         replace(BATCH_INFER, ".InferShapeRange(InferShapeRangeForBatchMatMulV3);",
                 ".InferShapeRange(InferShapeRangeForBatchMatMulV3)\n    .InferDataType(InferDataTypeForBatchMatMulV3);")
         replace(BATCH_HOST, '#include "batch_mat_mul_v3_base_tiling.h"',
-                '#include "batch_mat_mul_v3_base_tiling.h"\n#include "paretopilot_params.h"\n#include <cstdio>')
+                '#include "batch_mat_mul_v3_base_tiling.h"\n#include "paretopilot_params.h"\n#include "paretopilot_cube_plan.h"\n#include <cstdio>')
         replace(BATCH_HOST, "    auto ret = MatmulV3BaseTiling::DoLibApiTiling();", """    if (PP_EXPLICIT_TILES && PP_BATCH_STRATEGY != 1) {
         OP_LOGE(args_.opName, "Explicit tiles require common batch_strategy=1");
         return ge::GRAPH_FAILED;
     }
     auto ret = MatmulV3BaseTiling::DoLibApiTiling();
     if (ret != ge::GRAPH_SUCCESS) { return ret; }""")
-        replace(BATCH_HOST, "void BatchMatmulV3BaseTiling::DoCommonTiling()\n{\n    TuneBaseMKN(runInfo_, args_, cBatchDimAll_, compileInfo_.aicNum);",
-                "void BatchMatmulV3BaseTiling::DoCommonTiling()\n{\n    if (!PP_EXPLICIT_TILES) { TuneBaseMKN(runInfo_, args_, cBatchDimAll_, compileInfo_.aicNum); }")
-        replace(BATCH_HOST, "    DoCommonTiling();", """    DoCommonTiling();
-    if (PP_EXPLICIT_TILES) {
+        replace(BATCH_HOST, "    DoCommonTiling();", """    if (PP_EXPLICIT_TILES) {
         const auto &pp = bmmTilingData_.matmulTiling.matmulTiling;
         const uint64_t ppL1 = static_cast<uint64_t>(pp.depthA1) * pp.baseM * pp.baseK * aDtypeSize_ +
                               static_cast<uint64_t>(pp.depthB1) * pp.baseN * pp.baseK * bDtypeSize_;
         if (pp.baseM != PP_BASE_M || pp.baseN != PP_BASE_N || pp.baseK == 0 ||
+            pp.usedCoreNum == 0 || pp.usedCoreNum > compileInfo_.aicNum ||
+            pp.singleCoreM == 0 || pp.singleCoreN == 0 || pp.singleCoreK != args_.kValue ||
+            pp.stepM == 0 || pp.stepN == 0 || pp.stepKa == 0 || pp.stepKb == 0 ||
+            pp.depthA1 == 0 || pp.depthB1 == 0 ||
             ppL1 > compileInfo_.l1Size + 256UL) {
             OP_LOGE(args_.opName, "Explicit tile dependency/capacity validation failed");
             return ge::GRAPH_FAILED;
         }
-    }""")
+        // The common Device scheduler accepts API single-core partitions.
+        // DoCommonTiling would replace them and their L1 steps/depths, leaving
+        // a hybrid TCubeTiling that has not been validated by GetTiling.
+        bmmTilingData_.matmulTiling.tileL2cacheTiling.mTileCntL2 = 1;
+        bmmTilingData_.matmulTiling.tileL2cacheTiling.nTileCntL2 = 1;
+        DoTilingKeyCustom();
+        return ge::GRAPH_SUCCESS;
+    }
+    DoCommonTiling();""")
         # Keep the default algorithm intact. The alternative keeps upstream
         # common tiling and excludes L1-full-load/multibatch specialization.
         replace(BATCH_HOST, "    DoL1FullLoadTiling();", "    if (PP_BATCH_STRATEGY == 0) { DoL1FullLoadTiling(); }")
@@ -277,6 +288,7 @@ namespace ops {""")
                 "    if (PP_BATCH_STRATEGY == 0 && compileInfo_.supportL0c2out && tilingSelect_ != TilingCalcSelect::COMMON &&")
         replace(BATCH_HOST, "    workspaces[0] = workspaceSize_;", """    workspaces[0] = workspaceSize_;
     const auto &ppTiling = bmmTilingData_.matmulTiling.matmulTiling;
+    paretopilot::PrintCubePlan("FINAL", ppTiling);
     std::fprintf(stderr, "PARETOPILOT_TILE_REQUEST={\\\"base_m\\\":%d,\\\"base_n\\\":%d,\\\"base_k_auto\\\":true}\\n", PP_BASE_M, PP_BASE_N);
     std::fprintf(stderr, "PARETOPILOT_PARAMS=%s\\nPARETOPILOT_OFFICIAL=%s\\n", PP_PARAMS_HASH, PP_SOURCE_COMMIT);
     std::fprintf(stderr, "PARETOPILOT_BATCH_TILING={\\\"core_limit\\\":%d,\\\"tiling_policy\\\":%d,\\\"batch_strategy\\\":%d,\\\"used_core_num\\\":%u,\\\"base_m\\\":%u,\\\"base_n\\\":%u,\\\"base_k\\\":%u,\\\"tiling_key\\\":%llu,\\\"block_dim\\\":%llu,\\\"batch_count\\\":%llu,\\\"multi_batch\\\":%d,\\\"load_mode\\\":%d}\\n",
@@ -286,6 +298,7 @@ namespace ops {""")
         static_cast<unsigned long long>(batchInfo_.batchC),
         static_cast<int>(tilingEnable_.tilingEnableMultiBatch), static_cast<int>(tilingEnable_.tilingEnableLoadMode));""")
         (project/BATCH_HOST).with_name("paretopilot_params.h").write_text(header, encoding="utf-8")
+        shutil.copyfile(Path(__file__).parent/"official_adapter/cube_plan.h", (project/BATCH_HOST).with_name("paretopilot_cube_plan.h"))
     adapter = Path(__file__).parent/"official_adapter"
     for name in ("parser.cpp", "parser.cmake"):
         shutil.copyfile(adapter/("batch_parser.cpp" if batch and name == "parser.cpp" else name), project/name)
@@ -400,6 +413,21 @@ def read_effective_tiling(log, params, batch=False):
         raise TuningError("Invalid official MatMul effective tiling JSON") from exc
     if not records:
         raise TuningError("Official MatMul effective tiling record missing in ATC log")
+    final_plans = [json.loads(m) for m in re.findall(r"PARETOPILOT_FINAL_CUBE_PLAN=(\{[^\r\n]*\})", text)] if batch else []
+    if params.get("base_m", 0):
+        api_plans = [json.loads(m) for m in re.findall(r"PARETOPILOT_API_CUBE_PLAN=(\{[^\r\n]*\})", text)]
+        if not api_plans or len(api_plans) != len(final_plans) or len(final_plans) != len(records):
+            raise TuningError("Explicit API/final cube-plan evidence missing")
+        if any(not isinstance(a, dict) or a != b or not isinstance(a.get("raw"), str)
+               or not re.fullmatch(r"(?:[0-9a-f]{2})+", a["raw"]) for a, b in zip(api_plans, final_plans)):
+            raise TuningError("Explicit API cube plan was overwritten after GetTiling")
+    if final_plans:
+        if len(final_plans) != len(records):
+            raise TuningError("Final cube-plan count does not match Host tiling records")
+        for record, plan in zip(records, final_plans):
+            if any(plan.get(k) != record.get(k) for k in ("base_m", "base_n", "base_k", "used_core_num")):
+                raise TuningError("Final cube plan and Host tiling record disagree")
+            record["cube_plan"] = plan
     for record in records:
         if not isinstance(record, dict) or not {"core_limit", "tiling_policy", "used_core_num", "base_m", "base_n", "base_k", "tiling_key", *params} <= record.keys():
             raise TuningError("Incomplete official MatMul effective tiling record")

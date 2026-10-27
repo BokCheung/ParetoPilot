@@ -265,6 +265,7 @@ class Runtime:
         if any(r["tiling_key"] != key or r["block_dim"] != block for r in effective):
             raise TuningError("Host tiling bytes and observed key/blockDim disagree")
         kernel = select_kernel(self.build["kernel_catalogs"], key)
+        write_json(directory/"kernel_selection.json", kernel)
         function = self.function(kernel)
         m = self.c["measurement"]
         samples = []
@@ -310,7 +311,7 @@ class Runtime:
                 self.np.save(directory/"output.npy", actual)
                 write_json(directory/"correctness.json", result)
                 if not result["passed"]:
-                    raise TuningError("Direct kernel output failed reference comparison")
+                    raise TuningError(f"Direct kernel output failed reference comparison; see {directory/'correctness.json'}, output.npy and kernel_selection.json")
                 return result
 
             launch()
@@ -321,7 +322,6 @@ class Runtime:
                 launch(timed=True)
                 compare()
             correctness = compare()
-        write_json(directory/"kernel_selection.json", kernel)
         return {"status": "ok", "mode": "ascend", "execution": "kernel",
                 "duration_us": statistics.median(samples), "samples_us": samples, "measured_bytes": None,
                 "timing_method": "device_event_us", "correctness": correctness,

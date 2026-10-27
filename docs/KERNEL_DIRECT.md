@@ -64,10 +64,11 @@ Set `search.domain_mode="manual"` to retain the configured static `space`.
 
 The Host calls `MultiCoreMatmulTiling::SetFixSplit(base_m, base_n, -1)` before
 `GetTiling`; baseK is always computed by the official API and is not searchable.
-Explicit requests bypass the KB/basic/split-K algorithms, then use the existing
-BatchMatMul common tiling to derive dependent L1 depths, steps and single-core
-dimensions. Automatic base-M/N retuning and L1-full-load/multibatch branches are
-excluded for these requests. Default `(0,0)` keeps the upstream automatic path.
+Explicit requests preserve the complete API TCubeTiling, including single-core
+partitions, L1 depths and steps. They use the common Device scheduler, while
+bypassing the Host `DoCommonTiling` rewrite as well as KB/basic/split-K,
+automatic base-M/N retuning and L1-full-load/multibatch selection.
+Default `(0,0)` keeps the upstream automatic path.
 The adapter currently accepts FP16 ND, no transpose/bias, on-the-fly K/N <=65535.
 The actual CANN API validates the platform buffers. Additional L0C/L1 capacity
 checks and exact final baseM/baseN matching reject unsupported or overwritten
@@ -75,8 +76,17 @@ requests rather than silently timing an automatic substitute.
 
 `host_tiling.log` contains `PARETOPILOT_TILE_REQUEST` with requested dimensions
 and `base_k_auto=true`, followed by the actual `PARETOPILOT_BATCH_TILING` record.
+`PARETOPILOT_API_CUBE_PLAN` and `PARETOPILOT_FINAL_CUBE_PLAN` record named fields
+and the entire TCubeTiling object as hex. For an explicit candidate they must
+match exactly before launch. The API may choose singleCoreN=256 and stepN=16
+for baseM=baseN=16; these dependent fields must not be replaced with base-sized
+single-core partitions or unrelated L1 depths. API split-K plans are rejected by
+the current common Device contract. Outer L2 partitioning is disabled for the
+explicit path; the API plan is retained. Default automatic Host behavior remains.
 `trial.json` records requested parameters and effective tiling, including actual
-baseK. Direct launches still require an exact compiled tiling-key match.
+baseK and the final cube plan. Direct launches still require an exact compiled
+tiling-key match. A correctness failure retains `kernel_selection.json`,
+`correctness.json` and `output.npy` for diagnosis.
 
 Installing the explicit-tile Host adapter for the first time invalidates older
 non-tile build fingerprints. Once it is built, later shapes and parameter

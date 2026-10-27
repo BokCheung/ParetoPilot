@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 import random
+import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -54,7 +56,12 @@ class ExplicitTileTests(unittest.TestCase):
             self.assertLess(op.index("if (PP_EXPLICIT_TILES)"), op.index("GetTilingFromRepo"))
             self.assertIn("runInfo_.baseK = ppApi.baseK", op)
             self.assertIn("runInfo_.needUpdate = false", op)
-            self.assertIn("if (!PP_EXPLICIT_TILES) { TuneBaseMKN", batch)
+            lib = batch[batch.index("ge::graphStatus BatchMatmulV3BaseTiling::DoLibApiTiling()"):
+                        batch.index("static void CalcBaseMN")]
+            branch = lib[lib.index("    if (PP_EXPLICIT_TILES) {"):lib.index("    DoCommonTiling();")]
+            self.assertIn("return ge::GRAPH_SUCCESS", branch)
+            self.assertNotIn("DoCommonTiling();", branch)
+            self.assertNotRegex(branch, r"pp\.stepN\s*=(?!=)")
             self.assertIn("ppL1 > compileInfo_.l1Size + 256UL", batch)
             self.assertIn("PP_EXPLICIT_TILES && PP_BATCH_STRATEGY != 1", batch)
 
@@ -66,11 +73,17 @@ class ExplicitTileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp)/"host.log"
             def write(r=record, req=request):
+                plan = {k: r[k] for k in ("base_m", "base_n", "base_k", "used_core_num")}
+                plan.update(raw="01020304", single_core_m=16, single_core_n=256, step_n=16, depth_a1=1, depth_b1=16)
                 path.write_text(f"PARETOPILOT_OFFICIAL={official.COMMIT}\n"+
+                    "PARETOPILOT_API_CUBE_PLAN="+json.dumps(plan)+"\n"+
+                    "PARETOPILOT_FINAL_CUBE_PLAN="+json.dumps(plan)+"\n"+
                     "PARETOPILOT_TILE_REQUEST="+json.dumps(req)+"\n"+
                     "PARETOPILOT_BATCH_TILING="+json.dumps(r), encoding="utf8")
             write()
-            self.assertEqual(official.read_effective_tiling(path, p, batch=True), [record])
+            observed = official.read_effective_tiling(path, p, batch=True)[0]
+            self.assertEqual(observed["cube_plan"]["step_n"], 16)
+            self.assertEqual(observed["base_m"], record["base_m"])
             for r, req in (({**record, "base_m": 32}, request), (record, {**request, "base_k_auto": False}),
                            (record, {**request, "base_n": 64})):
                 write(r, req)
@@ -78,7 +91,65 @@ class ExplicitTileTests(unittest.TestCase):
                     official.read_effective_tiling(path, p, batch=True)
             auto = {**p, "base_m": 0, "base_n": 0}
             write(record, {"base_m": 0, "base_n": 0, "base_k_auto": True})
-            self.assertEqual(official.read_effective_tiling(path, auto, batch=True), [record])
+            self.assertEqual(official.read_effective_tiling(path, auto, batch=True)[0]["base_k"], 64)
+
+    @unittest.skipUnless(shutil.which("g++"), "C++ compiler required for the real Host branch fixture")
+    def test_compiled_host_branch_preserves_16x16_api_partition_and_buffer_plan(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            project = directory/"project"
+            official.materialize(project, official.BATCH_DEFAULT_PARAMS.copy(), batch=True, runtime=True)
+            batch = (project/official.BATCH_HOST).read_text(encoding="utf8")
+            lib = batch[batch.index("ge::graphStatus BatchMatmulV3BaseTiling::DoLibApiTiling()"):
+                        batch.index("static void CalcBaseMN")]
+            branch = lib[lib.index("    if (PP_EXPLICIT_TILES) {"):lib.index("    DoCommonTiling();")]
+            cpp = r'''
+#include <cstdint>
+#include <cstring>
+#include <cassert>
+#include "cube_plan.h"
+namespace ge { const int GRAPH_SUCCESS=0, GRAPH_FAILED=1; }
+#define PP_EXPLICIT_TILES true
+#define PP_BASE_M 16
+#define PP_BASE_N 16
+#define OP_LOGE(...) ((void)0)
+struct Cube {
+ uint32_t usedCoreNum=16, singleCoreM=16, singleCoreN=256, singleCoreK=256;
+ uint32_t baseM=16, baseN=16, baseK=256, stepM=1, stepN=16, stepKa=1, stepKb=1;
+ uint32_t depthA1=1, depthB1=16;
+};
+struct Fixture {
+ struct { struct { Cube matmulTiling; struct { int mTileCntL2=0,nTileCntL2=0; } tileL2cacheTiling; } matmulTiling; } bmmTilingData_;
+ struct { uint64_t aicNum=24,l1Size=524288; } compileInfo_;
+ struct { uint64_t kValue=256; const char *opName="fixture"; } args_;
+ uint64_t aDtypeSize_=2,bDtypeSize_=2;
+ int commonCalls=0,keys=0;
+ void DoTilingKeyCustom() { ++keys; }
+ void DoCommonTiling() { ++commonCalls; bmmTilingData_.matmulTiling.matmulTiling.stepN=1; }
+ int Execute() {
+''' + branch + r'''
+   DoCommonTiling(); return ge::GRAPH_SUCCESS;
+ }
+};
+int main() {
+ Fixture f; Cube before=f.bmmTilingData_.matmulTiling.matmulTiling;
+ paretopilot::PrintCubePlan("API", before);
+ assert(f.Execute()==ge::GRAPH_SUCCESS);
+ const auto &after=f.bmmTilingData_.matmulTiling.matmulTiling;
+ paretopilot::PrintCubePlan("FINAL", after);
+ assert(std::memcmp(&before,&after,sizeof(Cube))==0);
+ assert(after.singleCoreN==256 && after.stepN==16 && after.depthA1==1 && after.depthB1==16);
+ assert(f.commonCalls==0 && f.keys==1);
+ f.bmmTilingData_.matmulTiling.matmulTiling.singleCoreK=128;
+ assert(f.Execute()==ge::GRAPH_FAILED);
+}
+'''
+            (directory/"main.cpp").write_text(cpp, encoding="utf8")
+            shutil.copyfile(ROOT/"paretopilot/official_adapter/cube_plan.h", directory/"cube_plan.h")
+            binary = directory/"fixture"
+            subprocess.run(["g++", "-std=c++11", str(directory/"main.cpp"), "-o", str(binary)], check=True, capture_output=True)
+            result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+            self.assertIn('"single_core_n":256', result.stderr)
 
 
 if __name__ == "__main__":
