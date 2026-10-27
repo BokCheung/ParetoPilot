@@ -4,6 +4,7 @@ import ctypes as C
 import json
 import io
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ import zipfile
 from paretopilot import official
 from paretopilot.config import load_config
 from paretopilot.direct_backend import KernelBackend, validate_result
-from paretopilot.direct_build import fp16_config, select_kernel, build_kernels
+from paretopilot.direct_build import fp16_config, select_kernel, build_kernels, kernel_build_environment
 from paretopilot.direct_worker import Runtime, decode_tiling, P
 from paretopilot.search import confirmation
 from paretopilot.util import TuningError, digest, file_hash, read_json, tree_hash, write_json
@@ -144,6 +145,7 @@ class DirectKernelTests(unittest.TestCase):
         out = project/"build/binary/ascend910b/bin/ascend910b/batch_mat_mul_v3"
         def command(argv, cwd, log, timeout, env):
             if "--build" in argv:
+                self.assertEqual(env["ASCENDC_PER_COMPILE_JOB_THREAD"], "4")
                 out.mkdir(parents=True)
                 (out/"kernel.o").write_bytes(b"fixture")
                 write_json(out/"kernel.json", {"binFileName": "kernel", "binFileSuffix": ".o", "kernelList": [{"tilingKey": 65536, "kernelName": "entry"}]})
@@ -163,6 +165,34 @@ class DirectKernelTests(unittest.TestCase):
         self.assertEqual(result["binary_soc"], "Ascend910B2")
         self.assertIn('"Ascend910B2"', env_script.read_text())
         self.assertNotIn(b'\r', env_script.read_bytes())
+
+    def test_upstream_wrapper_receives_three_arguments_without_inherited_thread_variable(self):
+        config = deepcopy(self.config)
+        config["implementation"]["build_jobs"] = 3
+        original = {**os.environ, "ASCENDC_PER_COMPILE_JOB_THREAD": ""}
+        env = kernel_build_environment(config, original)
+        self.assertEqual(env["ASCENDC_PER_COMPILE_JOB_THREAD"], "3")
+        self.assertEqual(original["ASCENDC_PER_COMPILE_JOB_THREAD"], "")
+        if os.name == "nt":
+            return
+        # Run the actual upstream wrapper, stubbing only task generation and
+        # compilation. The previous empty variable reduced child argc to two.
+        with zipfile.ZipFile(official.VENDOR/"ops-nn-matmul.zip") as archive:
+            for name in ("build_binary_single_op.sh", "get_threadnum_with_op.sh"):
+                raw = archive.read("scripts/kernel/binary_script/"+name)
+                (self.root/name).write_bytes(raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
+        (self.root/"build_binary_single_op_gen_task.sh").write_text('printf "ascendc_per_compile_job=0\\n"\n', newline="\n")
+        (self.root/"build_binary_single_op_exe_task.sh").write_text(
+            'test "$#" = 3 || exit 20\ntest "$2" = 3 || exit 21\nprintf "argc=%s threads=%s\\n" "$#" "$2"\n', newline="\n")
+        tools = self.root/"tools"
+        tools.mkdir()
+        gawk = tools/"gawk"
+        gawk.write_text('#!/bin/sh\ncat\n', newline="\n")
+        gawk.chmod(0o755)
+        env["PATH"] = str(tools)+os.pathsep+env["PATH"]
+        result = subprocess.run(["bash", "build_binary_single_op.sh", "BatchMatMulV3", "ascend910b", str(self.root/"out")],
+                                cwd=self.root, env=env, capture_output=True, text=True, timeout=15, check=True)
+        self.assertIn("argc=3 threads=3", result.stdout)
 
     def test_persistent_launcher_changes_parameters_without_atc_for_all_shapes(self):
         import numpy as np

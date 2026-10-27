@@ -106,6 +106,12 @@ Device calculation sources retain their checksum verification. The changed
 adapter fingerprint automatically selects a new cache generation; no manual
 cache deletion or CANN installation edits are needed.
 
+The direct CMake target also explicitly receives `ASCENDC_PER_COMPILE_JOB_THREAD`
+from `implementation.build_jobs` (default 4). Upstream normally exports this
+variable in `build.sh`; invoking a subtarget without it drops the thread argument
+and produces `build_binary_single_op_exe_task.sh: [ERROR]input error`. The selected
+value is recorded in `kernel-build-environment.json` and build provenance.
+
 - `direct_prepare/cache-build-logs/kernel-build.log`: initial device compilation.
 - `direct_prepare/cache-build-logs/launcher-build.log`: native timing bridge build.
 - `direct-worker.log` and `direct_prepare/ready.json`: capabilities, initialization

@@ -9,6 +9,15 @@ def enabled(config):
     return config.get("implementation", {}).get("execution", "om") == "kernel"
 
 
+def kernel_build_environment(config, env):
+    # build.sh normally exports this; our direct CMake target bypasses it.
+    # Without it, the unquoted upstream $thread_num disappears from argv.
+    jobs = config["implementation"].get("build_jobs", 4)
+    if type(jobs) is not int or jobs < 1:
+        raise TuningError("Kernel build_jobs must be a positive integer")
+    return {**env, "ASCENDC_PER_COMPILE_JOB_THREAD": str(jobs)}
+
+
 def fp16_config(config):
     """Limit upstream binary generation to our external ND/FP16 contract."""
     selected = []
@@ -24,6 +33,10 @@ def fp16_config(config):
 
 
 def build_kernels(config, result, directory, env):
+    build_env = kernel_build_environment(config, env)
+    result["binary_build_threads"] = int(build_env["ASCENDC_PER_COMPILE_JOB_THREAD"])
+    write_json(directory/"kernel-build-environment.json",
+               {"ASCENDC_PER_COMPILE_JOB_THREAD": build_env["ASCENDC_PER_COMPILE_JOB_THREAD"]})
     project = Path(result["source_dir"])
     binary_config = project/"matmul/batch_mat_mul_v3/op_host/config/ascend910b/batch_mat_mul_v3_binary.json"
     write_json(binary_config, fp16_config(read_json(binary_config)))
@@ -49,7 +62,7 @@ def build_kernels(config, result, directory, env):
                           str(config["implementation"].get("build_jobs", 4))]),
     ]
     for name, command in commands:
-        record = run_command(command, project, directory/(name+".log"), config["measurement"]["timeout_s"], env)
+        record = run_command(command, project, directory/(name+".log"), config["measurement"]["timeout_s"], build_env)
         write_json(directory/(name+".command.json"), record)
     root = build/"binary/ascend910b/bin/ascend910b/batch_mat_mul_v3"
     catalogs = []
