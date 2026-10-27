@@ -16,7 +16,7 @@ from paretopilot import official
 from paretopilot.config import load_config
 from paretopilot.direct_backend import KernelBackend, validate_result
 from paretopilot.direct_build import fp16_config, select_kernel, build_kernels, kernel_build_environment
-from paretopilot.direct_worker import Runtime, decode_tiling, P
+from paretopilot.direct_worker import Runtime, decode_tiling, P, capture_native, recent_error
 from paretopilot.search import confirmation
 from paretopilot.util import TuningError, digest, file_hash, read_json, tree_hash, write_json
 
@@ -30,6 +30,8 @@ class FakeNative:
         self.allocations, self.calls, self.arguments = {}, [], []
         self.count = 100
         self.bad_output = False
+        self.tiling_failure = False
+        self.error_message = b""
 
     def __getattr__(self, name):
         def function(*args):
@@ -66,6 +68,8 @@ class FakeNative:
             elif name == "aclrtEventElapsedTime":
                 args[0]._obj.value = 0.008
             elif name == "OpTilingForCompile":
+                if self.tiling_failure:
+                    return 0
                 params = json.loads(args[1])["paretopilot_params"]
                 record = {**params, "base_m": 16, "base_n": 16, "base_k": 16,
                           "used_core_num": 12, "block_dim": 12, "tiling_key": self.key,
@@ -81,6 +85,8 @@ class FakeNative:
                         "clear_atomic": True, "tiling_data": "01020304"}
                 C.memmove(args[6], json.dumps(info).encode()+b"\0", len(json.dumps(info))+1)
                 return 1
+            elif name == "aclGetRecentErrMsg":
+                return self.error_message
             return 0
         setattr(self, name, function)
         return function
@@ -112,6 +118,15 @@ class DirectKernelTests(unittest.TestCase):
         self.assertGreater(len(original["op_list"]), 1)
         with self.assertRaises(TuningError):
             fp16_config({**original, "op_list": []})
+
+    def test_capture_includes_native_stdout_and_stderr_and_handles_missing_recent_error(self):
+        path = self.root/"native.log"
+        with capture_native(path):
+            os.write(1, b"native stdout\n")
+            os.write(2, b"native stderr\n")
+        self.assertIn(b"native stdout", path.read_bytes())
+        self.assertIn(b"native stderr", path.read_bytes())
+        self.assertEqual(recent_error(SimpleNamespace()), "")
 
     def test_key_lookup_rejects_missing_duplicate_and_modified_artifact(self):
         catalogs = self.catalog()
@@ -234,6 +249,18 @@ class DirectKernelTests(unittest.TestCase):
                     bad.mkdir()
                     with self.assertRaisesRegex(TuningError, "reference comparison"):
                         runtime.evaluate({"params": self.params, "directory": str(bad)})
+                    fake.tiling_failure = True
+                    fake.error_message = b"fixture CANN compile info error"
+                    failed = case/"failed-host"
+                    failed.mkdir()
+                    with self.assertRaisesRegex(TuningError, "returned 0"):
+                        runtime.host_tiling(self.params, failed)
+                    diagnostics = read_json(failed/"host_tiling_diagnostics.json")
+                    self.assertEqual(diagnostics["return_code"], 0)
+                    self.assertEqual(diagnostics["recent_error"], "fixture CANN compile info error")
+                    self.assertEqual(diagnostics["output_bytes"], 0)
+                    self.assertIn("OpTilingForCompile returned 0", (failed/"host_tiling.log").read_text())
+                    self.assertIn("fixture CANN compile info error", (failed/"host_tiling.log").read_text())
                 finally:
                     runtime.close()
             self.assertFalse(fake.allocations)

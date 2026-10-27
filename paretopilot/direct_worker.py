@@ -8,6 +8,7 @@ from pathlib import Path
 import statistics
 import sys
 import time
+import traceback
 
 from .direct_build import select_kernel
 from .official import read_effective_tiling, validate_params
@@ -31,16 +32,38 @@ def bind(lib, name, args, result=C.c_int):
 
 @contextmanager
 def capture_native(path):
-    """Capture C++ stderr too, rather than only Python's sys.stderr."""
+    """Capture both native streams, including buffered C/C++ stdout."""
+    sys.stdout.flush()
     sys.stderr.flush()
-    saved = os.dup(2)
+    def flush_native():
+        if os.name == "nt":
+            return
+        try:
+            bind(C.CDLL(None), "fflush", [P])(None)
+        except (OSError, AttributeError, TuningError):
+            pass
+    flush_native()
+    saved = {fd: os.dup(fd) for fd in (1, 2)}
     with Path(path).open("wb") as stream:
-        os.dup2(stream.fileno(), 2)
+        for fd in saved:
+            os.dup2(stream.fileno(), fd)
         try:
             yield
         finally:
-            os.dup2(saved, 2)
-            os.close(saved)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            flush_native()
+            for fd, original in saved.items():
+                os.dup2(original, fd)
+                os.close(original)
+
+
+def recent_error(lib):
+    try:
+        value = bind(lib, "aclGetRecentErrMsg", [], C.c_char_p)()
+        return value.decode("utf-8", errors="replace")[-6000:] if isinstance(value, bytes) else ""
+    except (OSError, AttributeError, TuningError):
+        return ""
 
 
 def decode_tiling(info):
@@ -115,6 +138,7 @@ class Runtime:
         for path in libraries:
             if loader(os.fsencode(path)) != 0:
                 raise TuningError(f"Cannot register private Host tiling library: {path}")
+        self.tiling_libraries = [str(path) for path in libraries]
 
     def call(self, name, *args):
         ret = getattr(self.lib, name)(*args)
@@ -153,9 +177,22 @@ class Runtime:
                    "inputs": json.loads(args[3]), "outputs": json.loads(args[4]), "attrs": attrs})
         buffer, elapsed = C.create_string_buffer(4*1024*1024), (C.c_uint64*2)()
         with capture_native(directory/"host_tiling.log"):
-            ret = self.tiling(*args, buffer, len(buffer), elapsed, b"{}")
+            print("Calling OpTilingForCompile: BatchMatMulV3; params="+digest(params), flush=True)
+            ret = self.tiling(*args, buffer, len(buffer), elapsed,
+                              b'{"op_name":"paretopilot_BatchMatMulV3"}')
+            error = recent_error(self.lib) if ret != 1 else ""
+            print(f"OpTilingForCompile returned {ret}; output_bytes={len(buffer.value)}", flush=True)
+            if error:
+                print("CANN recent error: "+error, flush=True)
+        diagnostics = {"api": "OpTilingForCompile", "return_code": ret, "expected_success": 1,
+                       "recent_error": error, "output_bytes": len(buffer.value),
+                       "output_preview": buffer.value[:2000].decode("utf-8", errors="replace"),
+                       "tiling_libraries": self.tiling_libraries, "register_library": str(self.register._name),
+                       "pid": os.getpid(), "request": str(directory/"host_tiling_request.json")}
+        write_json(directory/"host_tiling_diagnostics.json", diagnostics)
         if ret != 1:
-            raise TuningError(f"Official Host tiling failed; see {directory/'host_tiling.log'}")
+            raise TuningError(f"Official Host tiling returned {ret}; {error or 'CANN supplied no recent error'}; "
+                              f"see {directory/'host_tiling_diagnostics.json'} and host_tiling.log")
         log = (directory/"host_tiling.log").read_text(encoding="utf-8", errors="replace")
         if "PARETOPILOT_PARAMS="+digest(params) not in log:
             raise TuningError("Direct Host tiling parameter signature missing or stale")
@@ -270,6 +307,7 @@ def main():
             try:
                 result = runtime.evaluate(request)
             except Exception as exc:
+                traceback.print_exc(file=sys.stderr)
                 result = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
             write_json(Path(request["directory"])/"direct_result.json", result)
     except Exception as exc:

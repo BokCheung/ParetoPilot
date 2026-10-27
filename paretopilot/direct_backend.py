@@ -70,9 +70,13 @@ class KernelBackend(AscendBackend):
         ready = prepare/"ready.json"
         request = prepare/"bootstrap.json"
         write_json(request, {"config": self.c, "build": self.build, "case": str(self.case), "ready": str(ready)})
+        env = environment(self.build["opp_path"])
+        # Set before loading CANN. Console-native output is captured locally;
+        # never depend on the test machine's default ~/ascend/log location.
+        env.update(ASCEND_SLOG_PRINT_TO_STDOUT="1", ASCEND_GLOBAL_LOG_LEVEL="1", PYTHONUNBUFFERED="1")
         self.log = (self.root/"direct-worker.log").open("w", encoding="utf-8")
         self.process = subprocess.Popen([sys.executable, "-m", "paretopilot.direct_worker", str(request)],
-                                        cwd=self.root, env=environment(self.build["opp_path"]),
+                                        cwd=self.root, env=env,
                                         stdin=subprocess.PIPE, stdout=self.log, stderr=subprocess.STDOUT,
                                         text=True, encoding="utf-8", start_new_session=os.name != "nt")
         status = self.wait_file(ready)

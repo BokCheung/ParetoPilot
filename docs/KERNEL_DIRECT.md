@@ -118,6 +118,13 @@ value is recorded in `kernel-build-environment.json` and build provenance.
   and worker failures. Missing CANN symbols are explicit errors.
 - `source_baseline/` and `trials/*/host_tiling_request.json`, `host_tiling.log`,
   `host_tiling.json`: actual Host invocation, signatures and complete raw result.
+- `host_tiling_diagnostics.json`: native API return code, recent ACL error,
+  returned byte count/preview and registered library paths, including failed
+  calls. The worker enables CANN console diagnostics before loading libraries;
+  both native stdout and stderr are captured and worker exceptions print a
+  traceback. A silent native failure still produces a nonempty call log and
+  structured diagnostic record. This worker-only diagnostic update reuses
+  existing verified kernel builds.
 - `kernel_selection.json`, `selection.json`, `direct_result.json`, `trial.json`:
   key/entry/binary hashes, samples, timing method and selection evidence.
 - `correctness.json` and `output.npy`: numerical checks against the fixed reference.
