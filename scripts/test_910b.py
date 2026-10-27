@@ -227,6 +227,9 @@ def prepare_configs(args, output):
         smoke["space"] = {name: [values[0]] for name, values in config["space"].items()}
         if official_enabled(config):
             smoke["space"] = {k: [v] for k, v in default_params(config).items()}
+            if batch_enabled(config) and "base_m" in config["space"]:
+                # Source smoke also verifies one explicit-tile candidate.
+                smoke["space"] = deepcopy(config["space"])
         else:
             smoke["space"]["block_dim"] = [1]
         for suffix, value in ((kind, config), (kind+"-smoke", smoke)):
@@ -297,10 +300,24 @@ def verify_result(directory, smoke):
                 or selection.get("commit") != COMMIT or selection.get("operator") != "BatchMatMulV3"
                 or not selection.get("effective_tiling")):
             raise TuningError(f"{directory.name}: invalid BatchMatMulV3 source smoke evidence")
+        from paretopilot.space import enumerate_space
+        tile_params = next((p for p in enumerate_space(config) if p.get("base_m", 0)), None)
+        if tile_params is not None:
+            tile = result.get("tile_smoke", {})
+            if (not valid(tile) or tile.get("role") != "candidate" or tile.get("params") != tile_params
+                    or tile.get("operator_identity", {}).get("Op Type") != "BatchMatMulV3"
+                    or tile.get("input_shapes") != inputs or tile.get("output_shape") != output
+                    or len(tile.get("samples_us", [])) != config["measurement"]["repeats"]
+                    or (tile.get("selection") or {}).get("commit") != COMMIT
+                    or not (tile.get("selection") or {}).get("effective_tiling")
+                    or any(r.get("base_m") != tile_params["base_m"] or r.get("base_n") != tile_params["base_n"]
+                           for r in (tile.get("selection") or {}).get("effective_tiling", []))):
+                raise TuningError(f"{directory.name}: invalid explicit baseM/baseN smoke evidence")
         return {"status": "passed", "scope": "source_smoke", "selected": "source_baseline",
                 "reason": result["reason"], "report": str(directory/"report.html"),
                 "timing_method": trial.get("timing_method", "task_duration_us"),
-                "task_metrics": {"source_baseline_us": trial["duration_us"], "tuning_accepted": False},
+                "task_metrics": {"source_baseline_us": trial["duration_us"], "tuning_accepted": False,
+                                 **({"tile_smoke_us": result["tile_smoke"]["duration_us"]} if tile_params else {})},
                 "cache_hit": selection.get("cache_hit", False)}
     if result.get("routing", {}).get("tuning_supported") is False:
         verified = verify_baseline_result(directory)

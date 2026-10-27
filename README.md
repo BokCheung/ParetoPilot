@@ -17,7 +17,9 @@ Add 保留原有 Ascend C 模板。
 | 独立候选打分 | `[32,1,128]` | `[32,128,100]` | `[32,1,100]` | `examples/ascend910b_batchmatmul_batched_rhs.json` |
 
 以上用例均为 FP16、外部 ND、无转置和 bias，均接入 V3 源码调优；支持示例中的非对齐维度与
-批次广播。Host 参数是 `core_limit`、`tiling_policy`、`batch_strategy`，分块及缓冲由官方算法计算。
+批次广播。Host 参数包含 `core_limit`、`tiling_policy`、`batch_strategy` 和 `base_m/base_n`。
+显式分块使用官方 `SetFixSplit(M,N,-1)`，baseK 自动计算；`base_m=base_n=0` 保留官方自动策略。
+三个用例的 kernel 直调烟测均检查默认参数和一个显式分块候选，详见 [直调说明](docs/KERNEL_DIRECT.md)。
 Add 支持任意正整数 numel 和尾块，参数为 `tile_elems`、`buffers`、`block_dim`。
 
 官方源码与离线构建依赖已随 GitHub 仓库打包。**本地没有 CANN/NPU；源码编译、精度和性能仍需在

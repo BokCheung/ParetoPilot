@@ -34,8 +34,9 @@ class OfficialBatchMatmulTests(unittest.TestCase):
     def trial(self, role, params=None, time=None):
         params = params or official.default_params(self.c)
         inputs, output = shapes(self.c["operator"])
-        changed = params != official.BATCH_DEFAULT_PARAMS
-        record = {**params, "base_m": 64 if changed else 128, "base_n": 128, "base_k": 64,
+        changed = any(params.get(k, 0) != v for k, v in official.BATCH_DEFAULT_PARAMS.items()) or bool(params.get("base_m", 0))
+        record = {**params, "base_m": params.get("base_m") or (64 if changed else 128),
+                  "base_n": params.get("base_n") or 128, "base_k": 64,
                   "used_core_num": 12, "tiling_key": 1, "block_dim": 12, "multi_batch": 0,
                   "load_mode": 0, "batch_count": 1}
         return {"status": "ok", "mode": "ascend", "role": role, "params": params,
@@ -51,7 +52,11 @@ class OfficialBatchMatmulTests(unittest.TestCase):
             c = load_config(ROOT/f"examples/ascend910b_batchmatmul{suffix}.json")
             self.assertTrue(official.batch_enabled(c))
             self.assertFalse(same_operator(c))  # Source baseline policy, not stock-V2 matching.
-            self.assertEqual(len(enumerate_space(c)), 12)
+            pool = enumerate_space(c)
+            self.assertGreater(len(pool), 12)
+            self.assertTrue(any(p["base_m"] for p in pool))
+            self.assertTrue(all(not p["base_m"] or (p["batch_strategy"] == p["tiling_policy"] == 1) for p in pool))
+            self.assertIn("base_m", analyze(c)["suggested_priority"])
             self.assertIn("batch_strategy", analyze(c)["suggested_priority"])
             self.assertEqual(op_names(c), ("ParetoPilotOfficialBatchMatMul", "batch_mat_mul_v3"))
         self.assertEqual(shapes(load_config(ROOT/"examples/ascend910b_batchmatmul_batched_rhs.json")["operator"]),
@@ -170,7 +175,8 @@ class OfficialBatchMatmulTests(unittest.TestCase):
             self.assertTrue(official.batch_enabled(read_json(path)))
         for name, path in configs.items():
             if name.endswith("-smoke"):
-                self.assertEqual(read_json(path)["space"], {k: [v] for k, v in official.BATCH_DEFAULT_PARAMS.items()})
+                self.assertIn("base_m", read_json(path)["space"])
+                self.assertTrue(any(p["base_m"] for p in enumerate_space(read_json(path))))
         session = script.Session(self.root, args)
         stages = []
         session.run = lambda name, command: stages.append(name)

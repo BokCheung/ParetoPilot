@@ -14,7 +14,7 @@ from .util import TuningError, digest, file_hash, read_json, tree_hash, write_js
 
 def runtime_environment(params):
     official.validate_params(params, batch=True)
-    return {**{"PARETOPILOT_"+k.upper(): str(v) for k, v in params.items()},
+    return {**{"PARETOPILOT_"+k.upper(): str(v) for k, v in {**official.TILE_DEFAULT_PARAMS, **params}.items()},
             "PARETOPILOT_REQUEST_HASH": digest(params)}
 
 
@@ -28,6 +28,8 @@ struct RuntimeParams {
     int core_limit = 0;
     int tiling_policy = 0;
     int batch_strategy = 0;
+    int base_m = 0;
+    int base_n = 0;
     const char *hash = nullptr;
     bool valid = false;
     static bool Read(const char *name, int max, int &out) {
@@ -50,7 +52,11 @@ struct RuntimeParams {
         }
         valid = hashValid && Read("PARETOPILOT_CORE_LIMIT", 24, core_limit)
             && Read("PARETOPILOT_TILING_POLICY", 1, tiling_policy)
-            && Read("PARETOPILOT_BATCH_STRATEGY", 1, batch_strategy);
+            && Read("PARETOPILOT_BATCH_STRATEGY", 1, batch_strategy)
+            && Read("PARETOPILOT_BASE_M", 256, base_m) && Read("PARETOPILOT_BASE_N", 256, base_n)
+            && ((base_m == 0 && base_n == 0) ||
+                (base_m > 0 && base_n > 0 && base_m % 16 == 0 && base_n % 16 == 0 &&
+                 tiling_policy == 1 && batch_strategy == 1));
     }
 };
 inline RuntimeParams Params() { return RuntimeParams(); }
@@ -58,6 +64,9 @@ inline RuntimeParams Params() { return RuntimeParams(); }
 #define PP_CORE_LIMIT (paretopilot::Params().core_limit)
 #define PP_TILING_POLICY (paretopilot::Params().tiling_policy)
 #define PP_BATCH_STRATEGY (paretopilot::Params().batch_strategy)
+#define PP_BASE_M (paretopilot::Params().base_m)
+#define PP_BASE_N (paretopilot::Params().base_n)
+#define PP_EXPLICIT_TILES (PP_BASE_M > 0 && PP_BASE_N > 0)
 #define PP_PARAMS_HASH (paretopilot::Params().hash)
 #define PP_PARAMS_VALID (paretopilot::Params().valid)
 ''' + f'#define PP_SOURCE_COMMIT "{official.COMMIT}"\n'

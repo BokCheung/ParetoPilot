@@ -106,6 +106,8 @@ Confirmation compares interleaved fresh baseline/candidate builds. The range thr
                  f"V3 tuning speedup: {final.get('primary_speedup', 'unavailable')}x.\n"
                  "\nHost controls: core_limit=0 keeps the physical core budget; tiling_policy=0 keeps upstream KB lookup; "
                  "batch_strategy=0 keeps upstream automatic L1/multibatch choices, 1 keeps common tiling. "
+                 "base_m/base_n=0 retain automatic tiles; explicit pairs use SetFixSplit(M,N,-1) with heuristic/common policy. "
+                 "baseK remains automatic. "
                  "No tile dimensions are overwritten after dependency calculation.\n")
     (root/"report.md").write_text(text, encoding="utf-8")
     rows = ''.join('<tr>'+''.join(f'<td>{html.escape(str(v))}</td>' for v in [t['generation'],t['status'],t.get('duration_us',''),t['params'],t.get('error','')])+'</tr>' for t in result['history'])

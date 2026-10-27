@@ -29,3 +29,14 @@
 另外已跑通 MatMul、Add 两套模拟搜索，每套 12 个候选，生成完整报告。模拟数据与 PyACL mock 不代表 NPU 计算结果。
 
 **本机尚未验证**：910B 上的 Ascend C 编译、OPP 注册、ATC 自定义节点转换、真实 PyACL 推理/精度、完整 msprof 采集导出链路，以及硬件性能收益。交付中含完成这些阶段所需的源代码和启动命令，按 DEPLOYMENT.md 先运行 smoke 验收。
+# Explicit baseM/baseN search (2026-10-27)
+
+Added optional paired `base_m/base_n` controls to the pinned BatchMatMulV3 Host
+adapter. Explicit requests enter `SetFixSplit(M,N,-1)` before official API
+dependency calculation, retain automatic baseK, bypass tile-rewriting strategies
+and verify final dimensions. CPU checks cover all three shapes, domain filtering,
+complete seeded search coverage, persistent native ABI fixtures, overwritten-tile
+rejection, smoke evidence and unchanged Device source hashes. Full local
+`python -m unittest discover -s tests -q`: 150 tests, 147 passed, 3 skipped.
+These checks do not establish successful CANN compilation or NPU execution of
+the new branch; the updated three-case hardware smoke remains required.

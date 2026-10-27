@@ -70,6 +70,8 @@ def load_config(path):
             required = {"core_limit", "tiling_policy"}
             if batch_enabled(c):
                 required.add("batch_strategy")
+                if "base_m" in c["space"] or "base_n" in c["space"]:
+                    required.update(("base_m", "base_n"))
         if baseline:
             required = set()
         if set(c["space"]) != required:
@@ -79,6 +81,9 @@ def load_config(path):
             raise TuningError("Official MatMul: core_limit must fit the configured AI Core limit (0=auto); tiling_policy must be 0 or 1")
         if batch_enabled(c) and any(v not in (0, 1) for v in c["space"]["batch_strategy"]):
             raise TuningError("batch_strategy must be 0 (upstream) or 1 (common)")
+        if batch_enabled(c) and "base_m" in c["space"]:
+            if any(v > 256 or v % 16 for key in ("base_m", "base_n") for v in c["space"][key]):
+                raise TuningError("base_m/base_n must be 0 or 16-aligned values <=256")
         if math.prod(map(len, c["space"].values())) > 200000:
             raise TuningError("Limit discrete template space to 200000 combinations")
         s = c["search"]

@@ -72,14 +72,17 @@ class FakeNative:
                 if self.tiling_failure:
                     return 0
                 params = json.loads(args[1])["paretopilot_params"]
-                record = {**params, "base_m": 16, "base_n": 16, "base_k": 16,
+                record = {**params, "base_m": params.get("base_m") or 16, "base_n": params.get("base_n") or 16, "base_k": 16,
                           "used_core_num": 12, "block_dim": 12, "tiling_key": self.key,
                           "batch_count": 1, "multi_batch": 0, "load_mode": 0}
                 assert os.environ["PARETOPILOT_CORE_LIMIT"] == str(params["core_limit"])
+                assert os.environ["PARETOPILOT_BASE_M"] == str(params.get("base_m", 0))
+                assert os.environ["PARETOPILOT_BASE_N"] == str(params.get("base_n", 0))
                 assert os.environ["PARETOPILOT_REQUEST_HASH"] == digest(params)
                 assert json.loads(args[3])[-2:] == [None, None]
                 assert json.loads(args[5])[2]["dtype"] == "int64"
                 message = (f"PARETOPILOT_PARAMS={digest(params)}\nPARETOPILOT_OFFICIAL={official.COMMIT}\n"
+                           "PARETOPILOT_TILE_REQUEST="+json.dumps({"base_m": params.get("base_m", 0), "base_n": params.get("base_n", 0), "base_k_auto": True})+"\n"
                            "PARETOPILOT_BATCH_TILING="+json.dumps(record)+"\n")
                 os.write(2, message.encode())
                 info = {"tiling_key": self.key, "block_dim": 12, "workspaces": [32],
@@ -266,7 +269,8 @@ class DirectKernelTests(unittest.TestCase):
                     patch.dict(sys.modules, {"tbe.common.platform": platform}):
                 runtime = Runtime({"config": config, "build": build, "case": str(case)})
                 try:
-                    for index, params in enumerate((self.params, {"core_limit": 12, "tiling_policy": 1, "batch_strategy": 1})):
+                    for index, params in enumerate((self.params, {"core_limit": 12, "tiling_policy": 1, "batch_strategy": 1},
+                            {"core_limit": 12, "tiling_policy": 1, "batch_strategy": 1, "base_m": 16, "base_n": 32})):
                         directory = case/str(index)
                         directory.mkdir()
                         result = runtime.evaluate({"params": params, "directory": str(directory)})
@@ -278,7 +282,7 @@ class DirectKernelTests(unittest.TestCase):
                     self.assertLess(fake.calls.index("aclrtSetDevice"), fake.calls.index("aclrtGetSocName"))
                     self.assertLess(fake.calls.index("aclrtGetSocName"), fake.calls.index("OpTilingForCompile"))
                     self.assertEqual(fake.calls.count("aclrtBinaryLoadFromFile"), 1)
-                    self.assertEqual(fake.calls.count("OpTilingForCompile"), 2)
+                    self.assertEqual(fake.calls.count("OpTilingForCompile"), 3)
                     fake.bad_output = True
                     bad = case/"bad"
                     bad.mkdir()

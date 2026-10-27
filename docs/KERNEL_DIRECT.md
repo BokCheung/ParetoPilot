@@ -19,7 +19,9 @@ python3 scripts/test_910b.py \
 This checks all three workloads without ATC/OM or unit/simulation tests in the
 smoke stage. The source package, device binaries and native timing bridge must
 be built on the first cache miss. That first build may take substantial time.
-Later shapes, parameter values and runs reuse the verified build.
+Later shapes, parameter values and runs reuse the verified build. With the new
+tile domains, smoke checks both the automatic source baseline and one explicit
+baseM=16/baseN=32 candidate for each workload. See `tile_smoke/trial.json`.
 Use `--matmul-case 2d` to start with one shape.
 
 ## Candidate search without unit/simulation tests
@@ -35,7 +37,7 @@ python3 -m paretopilot run \
 
 For 3D shared weights use `examples/ascend910b_batchmatmul_shared_rhs.json`;
 for 3D independent batch weights use `examples/ascend910b_batchmatmul_batched_rhs.json`.
-To perform only a direct default-source check, add `--smoke` and use a new output
+To perform the source/default and explicit-tile checks, add `--smoke` and use a new output
 directory. `--deps check` belongs to the acceptance script, not the module CLI.
 
 `implementation.execution="kernel"` is the equivalent JSON setting.
@@ -45,6 +47,43 @@ The acceptance script also supports `--matmul-execution kernel --scope full`,
 which includes the full preflight unit/simulation suite before hardware search.
 
 ## Execution and compilation boundaries
+
+### Explicit baseM/baseN search
+
+The three example configurations add `base_m=[0,16,32,64,128]` and
+`base_n=[0,32,64,128]`. A pair of zeros keeps automatic upstream tiling. Both
+dimensions must be nonzero for an explicit request, which requires
+`tiling_policy=1` and `batch_strategy=1`. Partial automatic/explicit pairs and
+dimensions exceeding the conservatively aligned workload shape are filtered.
+There are 48 legal combinations for 2D, 39 for shared RHS and 18 for batched RHS,
+including the existing automatic policy/core combinations. Budget=64,
+population=8 and generations=12 allow the seeded search to visit every legal
+combination with Dummy Agent retaining the domains. Failed candidates count
+toward the budget and remain visible in the report.
+
+The Host calls `MultiCoreMatmulTiling::SetFixSplit(base_m, base_n, -1)` before
+`GetTiling`; baseK is always computed by the official API and is not searchable.
+Explicit requests bypass the KB/basic/split-K algorithms, then use the existing
+BatchMatMul common tiling to derive dependent L1 depths, steps and single-core
+dimensions. Automatic base-M/N retuning and L1-full-load/multibatch branches are
+excluded for these requests. Default `(0,0)` keeps the upstream automatic path.
+The adapter currently accepts FP16 ND, no transpose/bias, on-the-fly K/N <=65535.
+The actual CANN API validates the platform buffers. Additional L0C/L1 capacity
+checks and exact final baseM/baseN matching reject unsupported or overwritten
+requests rather than silently timing an automatic substitute.
+
+`host_tiling.log` contains `PARETOPILOT_TILE_REQUEST` with requested dimensions
+and `base_k_auto=true`, followed by the actual `PARETOPILOT_BATCH_TILING` record.
+`trial.json` records requested parameters and effective tiling, including actual
+baseK. Direct launches still require an exact compiled tiling-key match.
+
+This Host adapter change invalidates the previous source build fingerprint.
+The first updated smoke builds one new package/binary cache; subsequent shapes
+and parameter combinations reuse it. No manual cache deletion is needed.
+CPU tests validate contracts and mock ABI execution; the new explicit path must
+still pass the above smoke command on the 910B2 before performance conclusions.
+
+Official API: [CANN 8.5 SetFixSplit](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/850/API/ascendcopapi/atlasascendc_api_07_0681.html).
 
 1. The pinned official Host implementation and the original Device sources are
    built offline. Upstream binary generation is restricted to the existing

@@ -140,11 +140,19 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
             source = evaluate(backend, config, default_params(config), root/"source_baseline", "source_baseline")
             if source["status"] != "ok":
                 raise TuningError(f"BatchMatMulV3 smoke failed: {source['error']}")
+            tile_trial = None
+            tile_params = next((p for p in enumerate_space(config) if p.get("base_m", 0)), None)
+            if tile_params is not None:
+                tile_trial = evaluate(backend, config, tile_params, root/"tile_smoke", "candidate")
+                if tile_trial["status"] != "ok":
+                    raise TuningError(f"Explicit baseM/baseN smoke failed: {tile_trial['error']}")
             result = {"mode": config["backend"], "status": "smoke_passed", "scope": "source_smoke",
                       "primary_baseline": "source_baseline", "source_baseline": source,
                       "selected": "source_baseline", "tuning_accepted": False,
                       "reason": "Source compile, correctness and timing verified; performance gain not evaluated",
                       "report": str(root/"report.html")}
+            if tile_trial:
+                result["tile_smoke"] = tile_trial
             write_json(root/"summary.json", result)
             write_baseline_report(root, config, source)
             return result

@@ -130,21 +130,25 @@ class SourceCacheTests(unittest.TestCase):
         env["PARETOPILOT_CORE_LIMIT"] = "12junk"
         self.assertEqual(subprocess.run([str(executable)], env=env).returncode, 2)
 
-    def test_fast_smoke_has_one_real_source_measurement_and_no_gain_claim(self):
+    def test_fast_smoke_checks_default_and_explicit_tiles_without_gain_claim(self):
         from tests.test_official_batchmatmul import OfficialBatchMatmulTests
         helper = OfficialBatchMatmulTests()
         helper.c = self.config
-        trial = helper.trial("source_baseline")
-        trial["roofline"] = {"arithmetic_intensity": 1, "flops": 1}
+        def trial(backend, config, params, directory, role):
+            result = helper.trial(role, params)
+            result["roofline"] = {"arithmetic_intensity": 1, "flops": 1}
+            return result
         output = self.root/"smoke"
         with patch("paretopilot.search.inspect_environment", return_value={"ready": True}), \
              patch("paretopilot.search.AscendBackend"), \
-             patch("paretopilot.search.evaluate", return_value=trial) as evaluate, \
+             patch("paretopilot.search.evaluate", side_effect=trial) as evaluate, \
              patch("paretopilot.search.write_baseline_report"), \
              patch("paretopilot.search.load_agent") as agent:
             result = run(self.config, output, smoke=True)
-        self.assertEqual(evaluate.call_count, 1)
-        self.assertEqual(evaluate.call_args.args[-1], "source_baseline")
+        self.assertEqual(evaluate.call_count, 2)
+        self.assertEqual(evaluate.call_args_list[0].args[-1], "source_baseline")
+        self.assertEqual(evaluate.call_args.args[-1], "candidate")
+        self.assertGreater(evaluate.call_args.args[2]["base_m"], 0)
         agent.assert_not_called()
         self.assertEqual(result["scope"], "source_smoke")
         self.assertNotIn("successful_candidates", result)

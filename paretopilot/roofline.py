@@ -23,6 +23,8 @@ def analyze(config, duration_us=None, measured_bytes=None):
         priority = ["core_limit", "tiling_policy"] if compute >= memory else ["tiling_policy", "core_limit"]
     if batch_enabled(config):
         priority.append("batch_strategy")
+        if "base_m" in config["space"]:
+            priority = ["base_m", "base_n", *priority]
     if baseline_only(config):
         priority = []
     return {"flops": flops, "minimum_bytes": minimum, "measured_bytes": measured_bytes,

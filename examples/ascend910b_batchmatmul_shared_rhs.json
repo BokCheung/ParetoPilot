@@ -33,12 +33,25 @@
     "batch_strategy": [
       0,
       1
+    ],
+    "base_m": [
+      0,
+      16,
+      32,
+      64,
+      128
+    ],
+    "base_n": [
+      0,
+      32,
+      64,
+      128
     ]
   },
   "search": {
-    "population": 4,
-    "generations": 3,
-    "budget": 8,
+    "population": 8,
+    "generations": 12,
+    "budget": 64,
     "seed": 42,
     "mutation_rate": 0.25,
     "min_gain": 0.03
