@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from paretopilot.compare_execution import compare, diagnose, direct_profile
+from paretopilot.compare_execution import compare, diagnose, direct_profile, latest_capture, reanalyze
 from paretopilot.config import load_config
 from paretopilot.direct_worker import profile_measurements
 from paretopilot.util import TuningError, read_json, write_json
@@ -72,6 +72,65 @@ class ExecutionCompareTests(unittest.TestCase):
         self.assertTrue(diagnose(om, direct, {"duration_us": 8})["effective_tiling_equal"])
         direct["selection"]["effective_tiling"][0]["cube_plan"]["step_n"] = 2
         self.assertFalse(diagnose(om, direct, {"duration_us": 8})["effective_tiling_equal"])
+
+    def test_decimal_and_missing_block_metadata_are_audited_not_guessed(self):
+        path = self.csv()
+        with path.open() as stream:
+            rows = list(csv.DictReader(stream))[:3]
+        for value in ("24", "24.0", "2.4e1", " 24.000\t"):
+            for row in rows:
+                row["Block Dim"] = value
+            result = direct_profile([self.csv(rows=rows)], 3, 24)
+            self.assertEqual(result["block_dim_check"]["status"], "matched")
+        for value in ("", "N/A", "--", "unknown", None):
+            for row in rows:
+                if value is None:
+                    row.pop("Block Dim", None)
+                else:
+                    row["Block Dim"] = value
+            result = direct_profile([self.csv(rows=rows)], 3, 24)
+            self.assertEqual(result["duration_us"], 8)
+            self.assertEqual(result["block_dim_check"]["checked_samples"], 0)
+            self.assertTrue(any("profiler_block_dim_unavailable" in x for x in
+                                diagnose(self.trial(8), self.trial(250), result)["findings"]))
+        for value in ("12.0", "24.5", "NaN", "Infinity", "bad", "0", "-24"):
+            for row in rows:
+                row["Block Dim"] = value
+            with self.assertRaisesRegex(TuningError, "Block Dim"):
+                direct_profile([self.csv(rows=rows)], 3, 24)
+        for row, value in zip(rows, ("24", "N/A", "24.0")):
+            row["Block Dim"] = value
+        result = direct_profile([self.csv(rows=rows)], 3, 24)
+        self.assertEqual(result["block_dim_check"]["status"], "partial")
+        self.assertEqual(result["block_dim_check"]["checked_samples"], 2)
+
+    def test_reanalysis_uses_existing_capture_without_compiling_or_launching(self):
+        root = self.root/"old"
+        summary = {"status": "failed", "scope": "execution_compare", "error": "Invalid profiler Block Dim",
+                   "params": {}, "kernel_event": self.trial(250), "om": self.trial(8)}
+        write_json(root/"comparison.json", summary)
+        write_json(root/"kernel_profile/bootstrap.json", {"config": self.c, "build": {}})
+        write_json(root/"kernel_profile/direct_result.json", self.trial(260))
+        path = self.csv(root/"kernel_profile/profiler/output")
+        with path.open() as stream:
+            rows = list(csv.DictReader(stream))
+        for row in rows:
+            row["Block Dim"] = "N/A"
+        self.csv(path.parent, rows)
+        write_json(self.root/"new-but-incomplete/comparison.json", {"status": "failed"})
+        self.assertEqual(latest_capture(self.root), root)
+        with patch("paretopilot.compare_execution.validate_result") as validate, \
+                patch("paretopilot.compare_execution.KernelBackend") as backend, \
+                patch("paretopilot.compare_execution.run_command") as command:
+            result = reanalyze(root)
+        validate.assert_called_once()
+        backend.assert_not_called()
+        command.assert_not_called()
+        self.assertEqual(result["status"], "passed")
+        self.assertNotIn("error", result)
+        self.assertEqual(result["metrics"]["om_task_p50_us"], 8)
+        self.assertEqual(result["metrics"]["kernel_task_p50_us"], 8)
+        self.assertEqual(read_json(root/"comparison.json")["status"], "passed")
 
     def test_profiler_scope_stops_and_destroys_after_failure(self):
         calls = []

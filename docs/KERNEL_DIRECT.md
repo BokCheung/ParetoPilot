@@ -74,6 +74,26 @@ direct `host_tiling_request.json`, `host_tiling.json`, `host_tiling.log`,
 profiler inventory, selected raw task rows, correctness and output arrays.
 Failed stages leave partial `comparison.json` and the suite's diagnostics ZIP.
 
+Some raw-kernel exports omit Block Dim or use `N/A`/empty values. These are
+reported as unavailable, never filled from the expected Host value. Numeric
+integer forms such as `24.0` are accepted; a numeric mismatch, fractional value
+or malformed text is still rejected with its original value in the error.
+`kernel_profile/profile_metrics.json` records `block_dim_check` (observed values,
+matched/unavailable sample counts), and diagnosis marks incomplete verification.
+
+After updating the parser, recover the most recent existing capture without
+ATC, kernel execution or re-export, using a command with no shell wildcards:
+
+```bash
+python3 -m paretopilot.compare_execution --reanalyze-latest runs
+```
+
+This selects the most recently modified comparison with a direct result and
+exported CSVs, prints its exact path and metrics, and updates that case's
+`comparison.json`/`comparison.md`. It does not change the original suite's
+`test-summary.json` or rerun unstarted cases. For a specific case use
+`--reanalyze runs/910b-YOUR-RUN/matmul-compare` instead.
+
 ## Candidate search without unit/simulation tests
 
 ```bash

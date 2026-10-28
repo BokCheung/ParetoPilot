@@ -1,6 +1,7 @@
 """Diagnose V3 OM task time versus direct task time and event intervals."""
 import argparse
 from copy import deepcopy
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import sys
 
@@ -13,6 +14,29 @@ from .util import TuningError, read_json, run_command, write_json
 
 
 CORE_TASKS = {"AI_CORE", "AI_CUBE", "AI_CUBE_CORE", "AI_VECTOR_CORE", "MIX_AIC"}
+
+
+def check_block_dims(rows, expected):
+    observed, checked, unavailable = [], 0, 0
+    for row in rows:
+        raw = row.get("Block Dim")
+        value = "" if raw is None else str(raw).strip()
+        if value not in observed:
+            observed.append(value)
+        if value.upper() in {"", "N/A", "NA", "-", "--", "NONE", "NULL", "UNKNOWN"}:
+            unavailable += 1
+            continue
+        try:
+            number = Decimal(value)
+            if not number.is_finite() or number <= 0 or number != number.to_integral_value():
+                raise ValueError()
+        except (InvalidOperation, ValueError) as exc:
+            raise TuningError(f"Invalid profiler Block Dim {raw!r}; expected integer {expected} or an unavailable marker") from exc
+        if number != expected:
+            raise TuningError(f"Direct profiler Block Dim {raw!r} differs from Host tiling {expected}")
+        checked += 1
+    return {"status": "matched" if not unavailable else "partial" if checked else "unavailable",
+            "expected": expected, "observed": observed, "checked_samples": checked, "unavailable_samples": unavailable}
 
 
 def direct_profile(paths, repeats, block_dim):
@@ -33,15 +57,11 @@ def direct_profile(paths, repeats, block_dim):
     selector = {k: rows[0][k] for k in (*IDENTITY_COLUMNS, "Task Type") if k in rows[0]}
     if any(any(row.get(k) != v for k, v in selector.items()) for row in rows):
         raise TuningError("Direct capture contains ambiguous core task identities; no target was guessed")
-    try:
-        if any("Block Dim" in row and int(row["Block Dim"].strip()) != block_dim for row in rows):
-            raise TuningError("Direct profiler Block Dim differs from Host tiling")
-    except ValueError as exc:
-        raise TuningError("Invalid profiler Block Dim") from exc
+    block_check = check_block_dims(rows, block_dim)
     result = read_profile(paths, selector, repeats, "Task Duration(us)")
     result.update(metric="Direct target-kernel Task Duration(us) median",
                   identity_basis="isolated single-kernel capture; exact count, identity and available Block Dim checked",
-                  task_rows=rows)
+                  task_rows=rows, block_dim_check=block_check)
     return result
 
 
@@ -67,8 +87,62 @@ def diagnose(om, direct, profiled):
     same_tiling = bool(tiling_signature(om)) and tiling_signature(om) == tiling_signature(direct)
     if not same_tiling:
         findings.append("effective_tiling_differs_or_missing: identical requested parameters did not establish identical effective tiling")
+    if profiled.get("block_dim_check", {}).get("status") in ("partial", "unavailable"):
+        findings.append("profiler_block_dim_unavailable: some/all exported tasks lack numeric Block Dim; launch dimensions come from Host evidence, not an independent profiler check")
     return {**ratios, "effective_tiling_equal": same_tiling, "findings": findings,
             "limit": "Single captures and factor-two diagnostic heuristics, not a causal proof or tuning acceptance. Event and task samples come from separate runs. Same source does not establish identical OM/direct binaries."}
+
+
+def complete_comparison(root, summary, config, result):
+    direct, om = summary["kernel_event"], summary["om"]
+    if tiling_signature(result) != tiling_signature(direct):
+        raise TuningError("Profiled and unprofiled direct tiling differ")
+    directory = root/"kernel_profile"
+    paths = sorted((directory/"profiler").rglob("op_summary*.csv"))
+    if not paths:
+        raise TuningError("No direct op_summary CSV; inspect kernel_profile/profiler_export.log and runtime.log")
+    write_json(directory/"profile_inventory.json", inspect_profiles(paths))
+    profile = direct_profile(paths, config["measurement"]["repeats"], result["selection"]["effective_tiling"][0]["block_dim"])
+    write_json(directory/"profile_metrics.json", profile)
+    summary.pop("error", None)
+    summary.update(status="passed", kernel_profile=profile, profiled_kernel_event=result,
+                   diagnosis=diagnose(om, direct, profile),
+                   metrics={"om_task_p50_us": om["duration_us"], "kernel_task_p50_us": profile["duration_us"],
+                            "kernel_event_p50_us": direct["duration_us"], "profiled_kernel_event_p50_us": result["duration_us"]})
+    metrics = summary["metrics"]
+    lines = ["# V3 execution comparison", "", "| Measurement | P50 (us) |", "|---|---:|",
+             *[f"| {key} | {value:.4f} |" for key, value in metrics.items()], "",
+             *[f"- {item}" for item in summary["diagnosis"]["findings"]], "", summary["diagnosis"]["limit"], "",
+             "See comparison.json, om/selection.json, kernel_event/host_tiling.json,",
+             "kernel_profile/kernel_selection.json, profile_metrics.json and both profiler directories."]
+    (root/"comparison.md").write_text("\n".join(lines)+"\n", encoding="utf-8")
+    write_json(root/"comparison.json", summary)
+    print("Comparison: "+str(root/"comparison.json"), flush=True)
+    print("P50 us: "+str(metrics), flush=True)
+    print("Profiler Block Dim: "+str(profile["block_dim_check"]), flush=True)
+    return summary
+
+
+def reanalyze(directory):
+    root = Path(directory).resolve()
+    summary = read_json(root/"comparison.json")
+    bootstrap = read_json(root/"kernel_profile/bootstrap.json")
+    result = read_json(root/"kernel_profile/direct_result.json")
+    if (summary.get("scope") != "execution_compare"
+            or any(summary.get(stage, {}).get("status") != "ok" for stage in ("om", "kernel_event"))):
+        raise TuningError("Reanalysis requires completed OM and direct Event measurements")
+    validate_result(result, bootstrap["config"], summary["params"], bootstrap["build"])
+    summary["analysis_source"] = "existing profiler CSVs; no compilation, device execution or export rerun"
+    return complete_comparison(root, summary, bootstrap["config"], result)
+
+
+def latest_capture(directory):
+    candidates = [p.parent for p in Path(directory).resolve().rglob("comparison.json")
+                  if (p.parent/"kernel_profile/direct_result.json").is_file()
+                  and any((p.parent/"kernel_profile/profiler").rglob("op_summary*.csv"))]
+    if not candidates:
+        raise TuningError(f"No comparison with exported direct CSVs found under {directory}")
+    return max(candidates, key=lambda p: (p/"comparison.json").stat().st_mtime_ns)
 
 
 def compare(config, output):
@@ -123,26 +197,7 @@ def compare(config, output):
             raise TuningError("Profiled and unprofiled direct tiling differ")
         backend.command([c["ascend"].get("msprof", "msprof"), "--export=on", "--output="+str(directory/"profiler")],
                         directory, "profiler_export", env)
-        paths = sorted((directory/"profiler").rglob("op_summary*.csv"))
-        if not paths:
-            raise TuningError("No direct op_summary CSV; inspect kernel_profile/profiler_export.log and runtime.log")
-        write_json(directory/"profile_inventory.json", inspect_profiles(paths))
-        profile = direct_profile(paths, c["measurement"]["repeats"], result["selection"]["effective_tiling"][0]["block_dim"])
-        write_json(directory/"profile_metrics.json", profile)
-        summary.update(status="passed", kernel_profile=profile, profiled_kernel_event=result,
-                       diagnosis=diagnose(om, direct, profile),
-                       metrics={"om_task_p50_us": om["duration_us"], "kernel_task_p50_us": profile["duration_us"],
-                                "kernel_event_p50_us": direct["duration_us"], "profiled_kernel_event_p50_us": result["duration_us"]})
-        metrics = summary["metrics"]
-        lines = ["# V3 execution comparison", "", "| Measurement | P50 (us) |", "|---|---:|",
-                 *[f"| {key} | {value:.4f} |" for key, value in metrics.items()], "",
-                 *[f"- {item}" for item in summary["diagnosis"]["findings"]], "", summary["diagnosis"]["limit"], "",
-                 "See comparison.json, om/selection.json, kernel_event/host_tiling.json,",
-                 "kernel_profile/kernel_selection.json, profile_metrics.json and both profiler directories."]
-        (root/"comparison.md").write_text("\n".join(lines)+"\n", encoding="utf-8")
-        print("Comparison: "+str(root/"comparison.json"), flush=True)
-        print("P50 us: "+str(metrics), flush=True)
-        return summary
+        return complete_comparison(root, summary, c, result)
     except BaseException as exc:
         summary.update(status="failed", error=f"{type(exc).__name__}: {exc}")
         raise
@@ -154,11 +209,21 @@ def compare(config, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--config")
+    parser.add_argument("--output")
+    replay = parser.add_mutually_exclusive_group()
+    replay.add_argument("--reanalyze", help="Reparse an existing case comparison directory without using the device")
+    replay.add_argument("--reanalyze-latest", help="Find and reparse the most recent comparison with exported CSVs below this directory")
     args = parser.parse_args()
+    if (args.reanalyze or args.reanalyze_latest) and (args.config or args.output):
+        parser.error("Reanalysis cannot be combined with --config/--output")
+    if not (args.reanalyze or args.reanalyze_latest) and not (args.config and args.output):
+        parser.error("Provide --config and --output, or --reanalyze/--reanalyze-latest")
     try:
-        compare(load_config(args.config), args.output)
+        if args.reanalyze or args.reanalyze_latest:
+            reanalyze(args.reanalyze or latest_capture(args.reanalyze_latest))
+        else:
+            compare(load_config(args.config), args.output)
     except Exception as exc:
         print(f"Comparison failed: {exc}", file=sys.stderr)
         return 2
