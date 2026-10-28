@@ -25,6 +25,55 @@ explicit candidate from the generated domain for each workload. See its actual
 parameters in `tile_smoke/trial.json`.
 Use `--matmul-case 2d` to start with one shape.
 
+## Diagnose OM versus direct timing
+
+```bash
+python3 scripts/test_910b.py --cann-path /usr/local/Ascend/cann-8.5.0 --soc Ascend910B2 --device 0 --deps check --operator matmul --matmul-execution kernel --matmul-case all --scope compare --timeout 3600
+```
+
+This diagnostic does not search or accept tuning. For each case, it exports the
+inputs/reference once and uses the same default source parameters, device,
+warmup and repeat count in three sequential stages:
+
+1. Unprofiled direct launch: the existing Event interval P50.
+2. Fresh ATC-built V3 OM: profiler target-task `Task Duration(us)` P50.
+3. The same offline direct binary: profiler target-task `Task Duration(us)` P50,
+   plus its Event interval while profiling (reported separately).
+
+The source/compiled cache is reused. Fresh OM compilation still takes time.
+Profiler is initialized before direct binary loading, starts after correctness
+and warmup, and stops before final output validation. Output is checked during
+each measured iteration as in normal direct search. Normal search never starts
+this diagnostic profiler. Raw launches need not have V3 operator metadata; the
+isolated process launches only one target kernel per measured iteration. The
+parser requires exactly the configured count of core tasks, a single task
+identity and matching Block Dim when exported. It rejects ambiguity or extra
+core tasks instead of selecting by duration. Inspect raw CSV/inventory on failure.
+
+Read `test-summary.json` for each case's three main metrics. Full evidence is in
+`matmul-compare/comparison.json` and the equivalent 3D case directories; the
+compact table is `comparison.md`. Metrics:
+
+- `om_task_p50_us`: OM profiler task time, comparable to earlier single-digit us.
+- `kernel_task_p50_us`: direct profiler task time, the matching measurement scope.
+- `kernel_event_p50_us`: unprofiled direct Event interval; not pure kernel time.
+- `profiled_kernel_event_p50_us`: Event interval under profiling; instrumentation
+  may change this and it is not substituted for unprofiled timing.
+
+If both task times are single-digit but Event time is ~250 us, the extra time
+lies outside the profiled kernel task. If direct task time itself is ~250 us,
+there is an execution-path regression to investigate. `diagnosis` reports both
+ratios and compares semantic effective tiling (including cube partitions and
+steps, excluding raw C++ padding). Factor-two findings are diagnostic heuristics,
+not causal proof or statistical acceptance. Same source/params do not prove
+identical binaries: OM uses ATC compilation, direct uses offline compiled kernels.
+
+Preserved evidence includes OM `atc.log`, `selection.json`, profiler CSVs;
+direct `host_tiling_request.json`, `host_tiling.json`, `host_tiling.log`,
+`kernel_selection.json` (entry, binary/metadata hashes), `direct_result.json`,
+profiler inventory, selected raw task rows, correctness and output arrays.
+Failed stages leave partial `comparison.json` and the suite's diagnostics ZIP.
+
 ## Candidate search without unit/simulation tests
 
 ```bash

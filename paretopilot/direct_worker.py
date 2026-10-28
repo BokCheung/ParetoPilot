@@ -22,6 +22,29 @@ U = C.c_uint32
 S = C.c_size_t
 
 
+@contextmanager
+def profile_measurements(profiler, config):
+    """Optional diagnostic capture; normal search never starts profiling."""
+    if profiler is None:
+        yield
+        return
+    def ok(code, name):
+        if code != 0:
+            raise TuningError(f"Direct profiler {name} failed with code {code}")
+    handle = profiler.create_config([config["ascend"]["device"]],
+                                    config["ascend"].get("aicore_metrics", 0), 0, 0x1 | 0x2 | 0x4)
+    if not handle:
+        raise TuningError("Direct profiler create_config returned null")
+    try:
+        ok(profiler.start(handle), "start")
+        try:
+            yield
+        finally:
+            ok(profiler.stop(handle), "stop")
+    finally:
+        ok(profiler.destroy_config(handle), "destroy_config")
+
+
 def bind(lib, name, args, result=C.c_int):
     try:
         fn = getattr(lib, name)
@@ -156,6 +179,16 @@ class Runtime:
         self.cleanup.callback(self.call, "aclrtResetDevice", device)
         self.platform_info = initialize_compile_platform(
             self.lib, self.c, Path(request.get("ready", self.case/"ready.json")).parent)
+        self.profiler = None
+        if request.get("profile_directory"):
+            import acl
+            path = Path(request["profile_directory"])
+            path.mkdir(parents=True)
+            code = acl.prof.init(str(path))
+            if code != 0:
+                raise TuningError(f"Direct profiler init failed with code {code}")
+            self.profiler = acl.prof
+            self.cleanup.callback(acl.prof.finalize)
         self.stream = self.handle("aclrtCreateStream", "aclrtDestroyStream")
         self.events = [self.handle("aclrtCreateEvent", "aclrtDestroyEvent") for _ in range(2)]
         self.inputs = [np.ascontiguousarray(np.load(self.case/f"input_{i}.npy", allow_pickle=False)) for i in range(2)]
@@ -318,9 +351,10 @@ class Runtime:
             compare()
             for _ in range(m["warmup"]):
                 launch()
-            for _ in range(m["repeats"]):
-                launch(timed=True)
-                compare()
+            with profile_measurements(self.profiler, self.c):
+                for _ in range(m["repeats"]):
+                    launch(timed=True)
+                    compare()
             correctness = compare()
         return {"status": "ok", "mode": "ascend", "execution": "kernel",
                 "duration_us": statistics.median(samples), "samples_us": samples, "measured_bytes": None,
@@ -343,8 +377,8 @@ def main():
         runtime = object.__new__(Runtime)
         runtime.__init__(bootstrap)
         write_json(bootstrap["ready"], {"status": "ready"})
-        for line in sys.stdin:
-            request = json.loads(line)
+        requests = [bootstrap["one_shot"]] if "one_shot" in bootstrap else (json.loads(line) for line in sys.stdin)
+        for request in requests:
             if request.get("action") == "close":
                 break
             try:

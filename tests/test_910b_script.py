@@ -152,6 +152,25 @@ class ScriptTests(unittest.TestCase):
             self.assertLess(stages.index("matmul-baseline"),stages.index("add-smoke"))
             self.assertEqual(stages[-2:],["add-full","matmul-full"] if scope=="full" else ["add-smoke","matmul-smoke"])
 
+    def test_compare_runs_only_diagnostics_for_all_three_cases(self):
+        args = script.parser().parse_args(["--cann-path", str(self.root/"cann"), "--soc", "Ascend910B2",
+            "--operator", "matmul", "--matmul-case", "all", "--matmul-execution", "kernel", "--scope", "compare", "--deps", "check"])
+        configs = script.prepare_configs(args, self.root)
+        session = script.Session(self.root, args)
+        stages = []
+        def run(name, argv):
+            stages.append(name)
+            if name.endswith("-compare"):
+                self.assertIn("paretopilot.compare_execution", argv)
+                write_json(self.root/name/"comparison.json", {"status": "passed", "metrics": {"om_task_p50_us": 8}, "diagnosis": {}})
+        session.run = run
+        script.execute_suite(session, args, sys.executable, configs)
+        self.assertEqual([s for s in stages if s.endswith("-compare")],
+                         ["matmul-compare", "matmul-shared-rhs-compare", "matmul-batched-rhs-compare"])
+        self.assertNotIn("unit-tests", stages)
+        self.assertFalse(any(s.endswith(("-smoke", "-full")) for s in stages))
+        self.assertEqual(len(session.data["results"]), 3)
+
     def test_failed_smoke_stops_before_full_search(self):
         configs=script.prepare_configs(self.args,self.root)
         session=script.Session(self.root,self.args)

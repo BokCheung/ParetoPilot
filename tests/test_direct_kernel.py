@@ -318,6 +318,31 @@ class DirectKernelTests(unittest.TestCase):
                 finally:
                     runtime.close()
             self.assertFalse(fake.allocations)
+            fake = FakeNative(reference)
+            def record_prof(name):
+                def call(*args):
+                    fake.calls.append("prof."+name)
+                    return 1 if name == "create" else 0
+                return call
+            prof = SimpleNamespace(**{name: record_prof(name) for name in ("init", "start", "stop", "finalize")},
+                                   create_config=record_prof("create"), destroy_config=record_prof("destroy"))
+            with patch("paretopilot.direct_worker.C.CDLL", return_value=fake), patch.dict(os.environ), \
+                    patch.dict(sys.modules, {"tbe.common.platform": platform, "acl": SimpleNamespace(prof=prof)}):
+                runtime = Runtime({"config": config, "build": build, "case": str(case),
+                                   "profile_directory": str(case/"profiler")})
+                try:
+                    directory = case/"profiled"
+                    directory.mkdir()
+                    result = runtime.evaluate({"params": self.params, "directory": str(directory)})
+                    validate_result(result, config, self.params, build)
+                    start, stop = fake.calls.index("prof.start"), fake.calls.index("prof.stop")
+                    self.assertLess(fake.calls.index("prof.init"), fake.calls.index("aclrtBinaryLoadFromFile"))
+                    self.assertEqual(fake.calls[:start].count("aclrtLaunchKernelWithConfig"), 1+config["measurement"]["warmup"])
+                    self.assertEqual(fake.calls[start:stop].count("aclrtLaunchKernelWithConfig"), config["measurement"]["repeats"])
+                finally:
+                    runtime.close()
+            self.assertLess(fake.calls.index("prof.stop"), fake.calls.index("prof.finalize"))
+            self.assertFalse(fake.allocations)
 
     def test_final_confirmation_uses_om_backend_and_never_direct_launch(self):
         from tests.test_official_batchmatmul import OfficialBatchMatmulTests

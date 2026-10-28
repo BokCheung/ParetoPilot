@@ -49,7 +49,7 @@ def parser():
     p.add_argument("--matmul-implementation", choices=("batch-v3", "legacy"), default="batch-v3", help="Default: BatchMatMulV3 source baseline and Host tiling; legacy retains earlier MatMulV3/baseline-only cases")
     p.add_argument("--matmul-execution", choices=("om", "kernel"), default="om", help="Kernel: persistent direct V3 search, fresh OM confirmation; batch-v3 only")
     p.add_argument("--matmul-case", choices=("2d", "shared_rhs", "batched_rhs", "3d", "all"), default="2d", help="Choose 2D/3D workloads; batch-v3 tunes all cases, legacy 3D cases are baseline-only")
-    p.add_argument("--scope", choices=("smoke", "full"), default="full", help="Batch-v3 smoke checks source compile/correctness/profile only; full adds tests, references, search and confirmation")
+    p.add_argument("--scope", choices=("smoke", "full", "compare"), default="full", help="Batch-v3: smoke checks source; full searches/confirms; compare profiles default V3 through OM and direct kernel without tuning")
     p.add_argument("--deps", choices=("install", "offline", "check"), default="install", help="install/offline use an isolated venv; check uses this interpreter without installing dependencies")
     p.add_argument("--wheelhouse", type=Path, help="Local wheels for --deps offline")
     p.add_argument("--venv", type=Path, default=ROOT/".venv-910b", help="Reusable venv for install/offline; must match this Python version")
@@ -383,13 +383,27 @@ def execute_suite(session, args, python, configs):
         doctor_config = session.root/"config/preflight.json"
         write_json(doctor_config, preflight)
     session.run("doctor", cli+["doctor", "--config", str(doctor_config), "--output", str(session.root/"environment.json")])
-    fast_smoke = args.scope == "smoke" and all(batch_enabled(read_json(configs[k])) for k in kinds)
+    fast_smoke = args.scope in ("smoke", "compare") and all(batch_enabled(read_json(configs[k])) for k in kinds)
     # Required imports prevent optional dependency tests from silently skipping.
     if not fast_smoke:
         session.run("python-dependencies", [python, "-c", "import acl,numpy,torch,onnx; print('PyACL:',acl.__file__); print('numpy/torch/onnx:',numpy.__version__,torch.__version__,onnx.__version__)"])
         session.run("python-packages", [python, "-c", "from importlib.metadata import distributions; print('\\n'.join(sorted(d.metadata['Name']+'=='+d.version for d in distributions() if d.metadata['Name'])))"])
     for kind in kinds:
         session.run("validate-"+kind, cli+["validate", "--config", str(configs[kind])])
+    if args.scope == "compare":
+        for kind in kinds:
+            name = kind+"-compare"
+            directory = session.root/name
+            session.run(name, [python, "-m", "paretopilot.compare_execution", "--config", str(configs[kind]),
+                               "--output", str(directory)])
+            result = read_json(directory/"comparison.json")
+            if result.get("status") != "passed":
+                raise TuningError(f"{name}: incomplete profiler comparison")
+            session.data["results"][name] = {"status": "passed", "scope": "execution_compare",
+                "metrics": result["metrics"], "diagnosis": result["diagnosis"],
+                "report": str(directory/"comparison.md"), "evidence": str(directory/"comparison.json")}
+            session.save()
+        return
     if not fast_smoke:
         session.run("unit-tests", [python, "-m", "unittest", "discover", "-s", "tests", "-v"])
         for kind in operator_kinds(args):
@@ -451,6 +465,8 @@ def main(argv=None):
         p.error("--soc must be the exact Ascend910B variant")
     if args.operator == "add" and args.matmul_case != "2d":
         p.error("--matmul-case requires --operator matmul or all")
+    if args.scope == "compare" and (args.operator != "matmul" or args.matmul_implementation != "batch-v3" or args.no_build_cache):
+        p.error("--scope compare requires --operator matmul, --matmul-implementation batch-v3 and build cache enabled")
     if args.deps == "offline" and (args.wheelhouse is None or not args.wheelhouse.is_dir()):
         p.error("--deps offline requires an existing --wheelhouse directory")
     if args.deps != "offline" and args.wheelhouse is not None:
