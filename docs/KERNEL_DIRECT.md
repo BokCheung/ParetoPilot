@@ -119,6 +119,16 @@ L1-full-load and multibatch remain available to automatic candidates, with their
 existing fixed-tile restrictions unchanged. Dummy Agent retains the generated
 domains and can later be replaced by an advisor proposing subsets of them.
 
+Automatic tiling (`base_m=base_n=0`) and explicit baseM/baseN are searched in
+the same run. Each population reserves a fresh candidate from each branch when
+both remain in the Agent's pool; the remaining slots use genetic proposals and
+random exploration. A historical seed remains first, while the other branch
+still gets a reserved slot. Evaluated elites remain available for parent/winner
+selection without consuming these slots again. This guarantees branch coverage
+with population >=2 and at least two evaluations of remaining budget, not equal
+budget allocation or exhaustive coverage. A successful exact historical retest
+can still skip search as described below; use `--fresh-search` to explore anew.
+
 Full runs use `.cache/tuning-results` separately from compiled source/kernel
 cache. `search.result_cache_dir` overrides its location. Keys include workload
 shapes and broadcasting, dtype/layout/transposition attributes, device/SoC/CANN,

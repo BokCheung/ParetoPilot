@@ -17,7 +17,7 @@ from .official import enabled as official_enabled, batch_enabled, default_params
 from .util import TuningError, digest, file_hash, tree_hash, write_json, read_json
 
 
-def next_population(config, ranked, pool, seen, proposal, rng):
+def next_population(config, ranked, pool, seen, proposal, rng, seed=None):
     size = config["search"]["population"]
     population = [t["params"] for t in ranked[:min(2, size-1)]]
     if ranked:
@@ -36,6 +36,24 @@ def next_population(config, ranked, pool, seen, proposal, rng):
     unseen = [p for p in pool if digest(p) not in seen and p not in population]
     rng.shuffle(unseen)
     population.extend(unseen[:max(0, size-len(population))])
+    if batch_enabled(config):
+        # Both official automatic tiling and explicit tiles need measured
+        # candidates, even when the explicit Cartesian domain is much larger.
+        fresh_pool = [p for p in pool if digest(p) not in seen]
+        ordered = [seed] if seed in fresh_pool else []
+        for explicit in (False, True):
+            if any(bool(p.get("base_m", 0)) == explicit for p in ordered):
+                continue
+            choices = [p for p in fresh_pool if bool(p.get("base_m", 0)) == explicit]
+            preferred = [p for p in population if p in choices]
+            if choices:
+                ordered.append(preferred[0] if preferred else rng.choice(choices))
+        for p in [*population, *unseen]:
+            if p in fresh_pool and p not in ordered:
+                ordered.append(p)
+        return ordered[:size]
+    if seed is not None:
+        population = [seed, *(p for p in population if p != seed)][:size]
     return population
 
 
@@ -234,10 +252,9 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
             write_json(root/f"agent/{generation:03d}.input.json", context)
             write_json(root/f"agent/{generation:03d}.output.json", proposal)
             decisions.append(proposal)
-            population = next_population(config, ranked, pool, seen, proposal, rng)
-            if generation == 0 and cached and cached["params"] in pool:
-                seed = cached["params"]
-                population = [seed, *(p for p in population if p != seed)][:config["search"]["population"]]
+            seed = cached["params"] if generation == 0 and cached and cached["params"] in pool else None
+            population = next_population(config, ranked, pool, seen, proposal, rng, seed=seed)
+            if seed is not None:
                 cache_match["seed_attempted"] = True
             fresh = [p for p in population if digest(p) not in seen]
             if not fresh:

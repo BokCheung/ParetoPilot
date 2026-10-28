@@ -16,6 +16,41 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ExplicitTileTests(unittest.TestCase):
+    def test_small_populations_measure_both_tiling_branches_for_all_shapes(self):
+        for suffix in ("", "_shared_rhs", "_batched_rhs"):
+            c = load_config(ROOT/f"examples/ascend910b_batchmatmul{suffix}.json")
+            c["search"]["population"] = 2
+            pool = enumerate_space(c)
+            for cached_explicit in (None, False, True):
+                seen, ranked, rng = set(), [], random.Random(42)
+                seed = next((p for p in pool if bool(p["base_m"]) == cached_explicit), None)
+                for generation in range(3):
+                    population = next_population(c, ranked, pool, seen, {"space": c["space"]}, rng,
+                                                 seed=seed if generation == 0 else None)
+                    self.assertEqual(len(population), 2)
+                    self.assertEqual({bool(p["base_m"]) for p in population}, {False, True})
+                    if generation == 0 and seed is not None:
+                        self.assertEqual(population[0], seed)
+                    for p in population:
+                        self.assertNotIn(digest(p), seen)
+                        seen.add(digest(p))
+                        ranked.append({"params": p, "duration_us": 1 if p["base_m"] else 10})
+                    ranked.sort(key=lambda t: t["duration_us"])
+
+    def test_branch_coverage_respects_agent_pool_and_exhaustion(self):
+        c = load_config(ROOT/"examples/ascend910b_batchmatmul.json")
+        c["search"]["population"] = 2
+        pool = enumerate_space(c)
+        for explicit in (False, True):
+            restricted = [p for p in pool if bool(p["base_m"]) == explicit]
+            for available in (restricted, restricted[:1], []):
+                population = next_population(c, [], available, set(), {"space": c["space"]}, random.Random(42))
+                self.assertEqual(len(population), min(2, len(available)))
+                self.assertTrue(all(p in available for p in population))
+            seen = {digest(p) for p in restricted}
+            population = next_population(c, [], pool, seen, {"space": c["space"]}, random.Random(42))
+            self.assertTrue(all(bool(p["base_m"]) != explicit for p in population))
+
     def test_domains_cover_all_three_shapes_and_search_reaches_every_combination(self):
         for suffix, count in (("", 48), ("_shared_rhs", 39), ("_batched_rhs", 18)):
             c = load_config(ROOT/f"examples/ascend910b_batchmatmul{suffix}.json")
