@@ -111,5 +111,8 @@ ATC/构建日志、correctness.json、profiling CSV 与有效 tiling 记录为�
 
 `--execution kernel` 在搜索阶段通过常驻进程调用官方 Host tiling、直接启动已编译的 kernel 入口，
 最终确认继续使用 ATC/OM。首次需编译 FP16/ND 模板分支和原生计时桥接；后续参数/shape 复用缓存。
-直调的 duration_us 是设备 Event 区间 P50，不能与 OM 的 Task Duration(us) 直接比较。
+直调搜索的 duration_us / samples_us 来自 profiler 目标任务 Task Duration(us)，
+timing_method=kernel_task_duration_us；默认 V3 基线与所有候选统一按该 P50 排名。
+Event 区间仅保存在 event_diagnostics 中作诊断；采集/导出失败不会回退 Event 排名。
+每个候选新增 profiler 导出开销，但不跑 ATC；最终确认仍走 OM profiler。
 默认仍是 OM 后端；完整使用方法和上板验证命令见 [Kernel 直调](KERNEL_DIRECT.md)。

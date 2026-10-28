@@ -276,8 +276,16 @@ class Runtime:
         write_json(directory/"host_tiling.json", info)
         return info, effective
 
-    def function(self, kernel):
+    def function(self, kernel, cleanup=None):
         path, entry = kernel["binary"], kernel["entry"]
+        if cleanup is not None:
+            # Re-register the binary after each trial's profiler init so every
+            # independent capture has metadata, without restarting ACL/TBE.
+            binary, function = P(), P()
+            self.call("aclrtBinaryLoadFromFile", os.fsencode(path), None, C.byref(binary))
+            cleanup.callback(self.call, "aclrtBinaryUnLoad", binary)
+            self.call("aclrtBinaryGetFunction", binary, entry.encode(), C.byref(function))
+            return function
         if path not in self.binaries:
             ptr = P()
             self.call("aclrtBinaryLoadFromFile", os.fsencode(path), None, C.byref(ptr))
@@ -290,6 +298,29 @@ class Runtime:
         return self.functions[path, entry]
 
     def evaluate(self, request):
+        if not request.get("profile_directory"):
+            return self._evaluate(request)
+        if self.profiler is not None:
+            raise TuningError("Per-trial profiling cannot overlap a bootstrap profiler session")
+        import acl
+        path = Path(request["profile_directory"])
+        path.mkdir(parents=True)
+        code = acl.prof.init(str(path))
+        if code != 0:
+            raise TuningError(f"Trial profiler init failed with code {code}")
+        def finalize():
+            code = acl.prof.finalize()
+            if code != 0:
+                raise TuningError(f"Trial profiler finalize failed with code {code}")
+        try:
+            with ExitStack() as cleanup:
+                cleanup.callback(finalize)
+                self.profiler = acl.prof
+                return self._evaluate(request, binary_cleanup=cleanup)
+        finally:
+            self.profiler = None
+
+    def _evaluate(self, request, binary_cleanup=None):
         started = time.monotonic()
         directory, params = Path(request["directory"]), request["params"]
         validate_params(params, batch=True)
@@ -299,7 +330,7 @@ class Runtime:
             raise TuningError("Host tiling bytes and observed key/blockDim disagree")
         kernel = select_kernel(self.build["kernel_catalogs"], key)
         write_json(directory/"kernel_selection.json", kernel)
-        function = self.function(kernel)
+        function = self.function(kernel, binary_cleanup)
         m = self.c["measurement"]
         samples = []
         with ExitStack() as cleanup:

@@ -140,11 +140,30 @@ class ShapeDomainTests(unittest.TestCase):
                               ({"status": "exact"}, record, {**trial, "samples_us": [1, 12]})):
             self.assertFalse(tuning_cache.stable_retest(c, source, t, rec, match))
 
+    def test_event_cache_cannot_seed_or_short_circuit_task_profiler_search(self):
+        c, source = self.configured(), self.source()
+        source["timing_method"] = "device_event_us"
+        params = {"base_m": 32, "base_n": 64, "core_limit": 12, "tiling_policy": 1, "batch_strategy": 1}
+        winner = {"status": "ok", "params": params, "duration_us": 6, "samples_us": [6]*20,
+                  "correctness": {"passed": True}, "timing_method": "device_event_us"}
+        key = tuning_cache.save(c, source, winner, {"tuning_accepted": True}, self.root)
+        record = read_json(self.root/"results"/(key+".json"))
+        source["timing_method"] = "kernel_task_duration_us"
+        self.assertEqual(tuning_cache.lookup(c, source)[1]["status"], "miss")
+        self.assertIsNone(tuning_cache.save(c, source, winner, {}, self.root))
+        winner["timing_method"] = "kernel_task_duration_us"
+        self.assertFalse(tuning_cache.stable_retest(c, source, winner, record, {"status": "exact"}))
+        tuning_cache.save(c, source, winner, {"tuning_accepted": True}, self.root)
+        new, match = tuning_cache.lookup(c, source)
+        self.assertEqual(match["status"], "exact")
+        self.assertTrue(tuning_cache.stable_retest(c, source, winner, new, match))
+
     def test_controller_retests_exact_hit_and_still_runs_fresh_om_confirmation(self):
         calls = []
         outer = self
         class Backend:
             candidate_duration = 6
+            task_ranking_fixture = False
             def __init__(self, config, root):
                 self.c = config
                 self.om_backend = self.Om(self)
@@ -158,6 +177,8 @@ class ShapeDomainTests(unittest.TestCase):
                 default = official.default_params(self.c)
                 changed = p != default and role != "baseline"
                 duration = self.candidate_duration if changed else 10
+                if self.task_ranking_fixture and directory.parent.name == "trials":
+                    duration = (20, 7, 9)[int(directory.name) % 3]
                 inputs, output = shapes(self.c["operator"])
                 record = {**p, "base_m": p.get("base_m") or (64 if changed else 128),
                           "base_n": p.get("base_n") or 128, "base_k": 64,
@@ -165,9 +186,10 @@ class ShapeDomainTests(unittest.TestCase):
                           "block_dim": 24, "multi_batch": 0, "load_mode": 0, "batch_count": 1}
                 trial["selection"].update(commit=official.COMMIT, operator="BatchMatMulV3", effective_tiling=[record])
                 trial.update(duration_us=duration, samples_us=[duration]*20, mode="ascend", execution=execution,
-                    timing_method="device_event_us" if execution == "kernel" else "task_duration_us",
+                    timing_method="kernel_task_duration_us" if execution == "kernel" else "task_duration_us",
                     measured_bytes=None, correctness={"passed": True}, input_shapes=inputs, output_shape=output,
                     operator_identity={"Op Type": "BatchMatMulV2" if role == "baseline" else "BatchMatMulV3"})
+                trial["event_diagnostics"] = {"duration_us": 1000-duration*10, "timing_method": "device_event_us"}
                 return trial
             def close(self): pass
         with patch("paretopilot.search.inspect_environment", return_value={"ready": True, "npu_smi": "Version: fixture"}), \
@@ -203,6 +225,20 @@ class ShapeDomainTests(unittest.TestCase):
             self.assertTrue(all(v[2] == "kernel" for v in calls))
             from scripts.test_910b import verify_result
             self.assertEqual(verify_result(self.root/"smoke", True)["status"], "passed")
+            Backend.candidate_duration = 6
+            Backend.task_ranking_fixture = True
+            for suffix in ("", "_shared_rhs", "_batched_rhs"):
+                case = load_config(ROOT/f"examples/ascend910b_batchmatmul{suffix}.json")
+                case["implementation"]["execution"] = "kernel"
+                case["search"].update(budget=3, population=2, generations=3, result_cache=False)
+                directory = self.root/("task-ranking"+suffix)
+                calls.clear()
+                run(case, directory)
+                result = read_json(directory/"summary.json")
+                self.assertEqual(result["winner"]["duration_us"], 7)
+                self.assertEqual(result["winner"]["timing_method"], "kernel_task_duration_us")
+                self.assertEqual(min(result["history"], key=lambda t: t["event_diagnostics"]["duration_us"])["duration_us"], 20)
+                self.assertTrue(all(v[2] == "om" for v in calls if "confirmation" in v[0]))
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ def identity(config, source):
         return None  # No persistent reuse without verified build/environment evidence.
     root = Path(__file__).parent
     files = [*sorted(root.glob("*.py")), *sorted((root/"official_adapter").glob("*"))]
-    family = {"format": 1, "commit": COMMIT, "installed_sha256": build["installed_sha256"],
+    family = {"format": 2, "ranking_metric": source.get("timing_method"), "commit": COMMIT, "installed_sha256": build["installed_sha256"],
               "build_environment": build["cache_identity"],
               "controller": {p.relative_to(root).as_posix(): file_hash(p) for p in files if p.is_file()},
               "soc": config["ascend"]["soc_version"], "cann": config["ascend"]["cann_version"],
@@ -43,6 +43,7 @@ def cache_root(config):
 def valid_record(record):
     try:
         return (record["key"] == digest(record["identity"]) and type(record["confirmed"]) is bool
+                and record.get("timing_method") == record["identity"]["family"].get("ranking_metric")
                 and isinstance(record["params"], dict)
                 and all(type(record[k]) in (float, int) and math.isfinite(record[k]) and record[k] > 0
                         for k in ("duration_us", "source_us")))
@@ -95,6 +96,8 @@ def lookup(config, source):
 def stable_retest(config, source, trial, record, match):
     if match.get("status") != "exact" or not record or not record["confirmed"] or trial.get("status") != "ok":
         return False
+    if not (source.get("timing_method") == trial.get("timing_method") == record.get("timing_method")):
+        return False
     if any(t.get("correctness", {}).get("passed") is not True or t.get("correctness", {}).get("simulated", False)
            for t in (source, trial)):
         return False
@@ -112,8 +115,11 @@ def save(config, source, winner, confirmation, run_directory):
     current = identity(config, source)
     if not config["search"].get("result_cache", True) or current is None or not winner or winner.get("status") != "ok":
         return None
+    if source.get("timing_method") != winner.get("timing_method"):
+        return None
     record = {"key": digest(current), "identity": current, "params": winner["params"],
               "duration_us": winner["duration_us"], "source_us": source["duration_us"],
+              "timing_method": source.get("timing_method"),
               "confirmed": confirmation.get("tuning_accepted") is True,
               "run": str(run_directory), "saved_utc": datetime.now(timezone.utc).isoformat()}
     if not valid_record(record):

@@ -1,6 +1,7 @@
 from contextlib import ExitStack
 from copy import deepcopy
 import ctypes as C
+import csv
 import json
 import io
 import os
@@ -15,7 +16,7 @@ import zipfile
 
 from paretopilot import official
 from paretopilot.config import load_config
-from paretopilot.direct_backend import KernelBackend, validate_result
+from paretopilot.direct_backend import KernelBackend, validate_result, validate_task_result
 from paretopilot.direct_build import fp16_config, select_kernel, build_kernels, kernel_build_environment
 from paretopilot.direct_worker import Runtime, decode_tiling, P, capture_native, recent_error, initialize_compile_platform
 from paretopilot.search import confirmation
@@ -343,6 +344,37 @@ class DirectKernelTests(unittest.TestCase):
                     runtime.close()
             self.assertLess(fake.calls.index("prof.stop"), fake.calls.index("prof.finalize"))
             self.assertFalse(fake.allocations)
+            # Search keeps ACL/input state but creates an isolated capture and
+            # re-registers the binary after profiler init for every candidate.
+            fake = FakeNative(reference)
+            with patch("paretopilot.direct_worker.C.CDLL", return_value=fake), patch.dict(os.environ), \
+                    patch.dict(sys.modules, {"tbe.common.platform": platform, "acl": SimpleNamespace(prof=prof)}):
+                runtime = Runtime({"config": config, "build": build, "case": str(case)})
+                try:
+                    for i in range(2):
+                        directory = case/f"profile-trial-{i}"
+                        directory.mkdir()
+                        previous = len(fake.calls)
+                        runtime.evaluate({"params": self.params, "directory": str(directory),
+                                          "profile_directory": str(directory/"profiler")})
+                        calls = fake.calls[previous:]
+                        self.assertLess(calls.index("prof.init"), calls.index("aclrtBinaryLoadFromFile"))
+                        self.assertLess(calls.index("aclrtBinaryUnLoad"), calls.index("prof.finalize"))
+                        self.assertEqual(calls[calls.index("prof.start"):calls.index("prof.stop")].count("aclrtLaunchKernelWithConfig"), 3)
+                        self.assertIsNone(runtime.profiler)
+                    self.assertEqual(fake.calls.count("aclInit"), 1)
+                    self.assertEqual(fake.calls.count("aclrtBinaryLoadFromFile"), 2)
+                    fake.tiling_failure = True
+                    directory = case/"failed-profile-trial"
+                    directory.mkdir()
+                    with self.assertRaises(TuningError):
+                        runtime.evaluate({"params": self.params, "directory": str(directory),
+                                          "profile_directory": str(directory/"profiler")})
+                    self.assertIsNone(runtime.profiler)
+                    self.assertEqual(fake.calls.count("prof.finalize"), 3)
+                finally:
+                    runtime.close()
+            self.assertFalse(fake.allocations)
 
     def test_final_confirmation_uses_om_backend_and_never_direct_launch(self):
         from tests.test_official_batchmatmul import OfficialBatchMatmulTests
@@ -368,27 +400,56 @@ class DirectKernelTests(unittest.TestCase):
         (opp/"host.so").write_bytes(b"immutable Host fixture")
         backend = object.__new__(KernelBackend)
         backend.c = self.config
+        backend.profile_search = True
         backend.build = {"installed_sha256": tree_hash(opp), "opp_path": str(opp)}
         backend.process = SimpleNamespace(stdin=io.StringIO())
         backend.om_backend = SimpleNamespace(evaluate=Mock(return_value={"stock": True}), source_builds={})
         backend.start = Mock()
         self.assertEqual(backend.evaluate({}, self.root, "baseline"), {"stock": True})
+        measured = []
+        def export(argv, directory, name, env):
+            path = directory/"profiler/op_summary.csv"
+            path.parent.mkdir()
+            with path.open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=["Op Name", "Op Type", "Task Type", "Block Dim", "Task Duration(us)"])
+                writer.writeheader()
+                for _ in range(self.config["measurement"]["repeats"]):
+                    writer.writerow({"Op Name": "kernel", "Op Type": "unknown", "Task Type": "AI_CORE", "Block Dim": "0", "Task Duration(us)": task_us})
+        backend.command = Mock(side_effect=export)
         for i, params in enumerate((self.params, {"core_limit": 12, "tiling_policy": 1, "batch_strategy": 1})):
             result = helper.trial("candidate", params)
-            result.update(execution="kernel", timing_method="device_event_us")
+            task_us = 14.5 if i == 0 else 7.82
+            result.update(execution="kernel", timing_method="device_event_us", duration_us=100+i*100,
+                          samples_us=[100+i*100]*self.config["measurement"]["repeats"])
             result["selection"].update(params=params, params_sha256=digest(params), installed_sha256=tree_hash(opp))
             directory = self.root/str(i)
             directory.mkdir()
             backend.wait_file = Mock(return_value=result)
-            backend.evaluate(params, directory, "candidate")
+            trial = backend.evaluate(params, directory, "candidate")
+            measured.append(trial)
+            self.assertEqual(trial["duration_us"], task_us)
+            self.assertEqual(trial["timing_method"], "kernel_task_duration_us")
+            self.assertEqual(trial["event_diagnostics"]["duration_us"], 100+i*100)
+            self.assertTrue((directory/"profile_result.json").is_file())
+            self.assertTrue(json.loads(backend.process.stdin.getvalue().splitlines()[-1])["profile_directory"])
+            validate_task_result(trial, self.config, params, backend.build)
+            with self.assertRaises(TuningError):
+                validate_task_result({**trial, "timing_method": "device_event_us"}, self.config, params, backend.build)
             self.assertIn(digest(params), backend.om_backend.source_builds)
             bad = deepcopy(result)
             bad["duration_us"] += 1
             with self.assertRaisesRegex(TuningError, "P50"):
                 validate_result(bad, self.config, params, backend.build)
         backend.start.assert_not_called()
+        self.assertEqual(min(measured, key=lambda t: t["duration_us"])["params"], measured[1]["params"])
+        self.assertEqual(min(measured, key=lambda t: t["event_diagnostics"]["duration_us"])["params"], measured[0]["params"])
         self.assertEqual(len(backend.process.stdin.getvalue().splitlines()), 2)
         backend.om_backend.evaluate.assert_called_once()
+        directory = self.root/"missing-profiler"
+        directory.mkdir()
+        backend.command.side_effect = None
+        with self.assertRaisesRegex(TuningError, "Event fallback is forbidden"):
+            backend.evaluate(params, directory, "candidate")
 
     def test_configuration_rejects_non_batch_and_uncached_execution(self):
         config = deepcopy(self.config)

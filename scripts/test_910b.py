@@ -316,6 +316,10 @@ def verify_result(directory, smoke):
                     or any(r.get("base_m") != tile_params["base_m"] or r.get("base_n") != tile_params["base_n"]
                            for r in (tile.get("selection") or {}).get("effective_tiling", []))):
                 raise TuningError(f"{directory.name}: invalid explicit baseM/baseN smoke evidence")
+        if config["implementation"].get("execution") == "kernel" and any(
+                t.get("timing_method") != "kernel_task_duration_us"
+                for t in ([trial, result["tile_smoke"]] if tile_params else [trial])):
+            raise TuningError(f"{directory.name}: smoke requires kernel profiler task P50; Event timing is diagnostic only")
         return {"status": "passed", "scope": "source_smoke", "selected": "source_baseline",
                 "reason": result["reason"], "report": str(directory/"report.html"),
                 "timing_method": trial.get("timing_method", "task_duration_us"),
@@ -345,11 +349,11 @@ def verify_result(directory, smoke):
             raise TuningError(f"{directory.name}: official source identity/effective tiling evidence missing")
     if batch_enabled(config):
         if config["implementation"].get("execution") == "kernel":
-            if (any(t.get("execution") != "kernel" or t.get("timing_method") != "device_event_us"
+            if (any(t.get("execution") != "kernel" or t.get("timing_method") != "kernel_task_duration_us"
                     for t in [result["source_baseline"], *good])
                     or any(t.get("execution") != "om" or t.get("timing_method") != "task_duration_us"
                            for t in confirmation)):
-                raise TuningError(f"{directory.name}: kernel search and independent OM confirmation evidence required")
+                raise TuningError(f"{directory.name}: kernel profiler-task search and independent OM confirmation evidence required")
         if result.get("primary_baseline") != "source_baseline" or result.get("selected") not in ("candidate", "source_baseline"):
             raise TuningError(f"{directory.name}: BatchMatMulV3 primary-baseline policy violated")
         all_trials = [result["baseline"], result["source_baseline"], *good, *confirmation]

@@ -43,8 +43,9 @@ warmup and repeat count in three sequential stages:
 The source/compiled cache is reused. Fresh OM compilation still takes time.
 Profiler is initialized before direct binary loading, starts after correctness
 and warmup, and stops before final output validation. Output is checked during
-each measured iteration as in normal direct search. Normal search never starts
-this diagnostic profiler. Raw launches need not have V3 operator metadata; the
+each measured iteration as in normal direct search. Search uses a separate
+per-trial capture and ranks profiler task time; this comparison additionally
+keeps a deliberately unprofiled Event stage. Raw launches need not have V3 operator metadata; the
 isolated process launches only one target kernel per measured iteration. The
 parser requires exactly the configured count of core tasks, a single task
 identity and matching Block Dim when exported. It rejects ambiguity or extra
@@ -240,8 +241,11 @@ Platform resource API: [CANN 8.5 get_soc_spec](https://www.hiascend.com/doc_cent
 2. A small C++ bridge is compiled against the installed CANN headers and
    `libascendcl.so`. It submits start-event, kernel and end-event calls natively,
    avoiding Python gaps between these calls.
-3. A persistent Python worker initializes one device/stream, uploads the fixed
-   inputs once and retains loaded binaries/function handles during search.
+3. A persistent Python worker initializes one device/stream and uploads fixed
+   inputs once. Each search trial initializes its own profiler output, reloads
+   the selected binary/function after profiler init for metadata registration,
+   and unloads it before finalizing that capture. ACL/TBE/device/input state
+   remains alive across candidates; source/device compilation is cached.
 4. Each request invokes `OpTilingForCompile` from `libregister.so` after loading
    the private tiling library through `TbeLoadSoAndSaveToRegistry`. Compile-info
    is taken from the generated kernel metadata, with actual device and current
@@ -268,14 +272,31 @@ are outside timing. Event intervals exclude the separate cleanup operations.
 
 ## Timing and final acceptance
 
-Direct `duration_us` is P50 of device-event intervals, explicitly labelled
-`timing_method=device_event_us`. It includes runtime submission gaps within the
-event interval. It is **not** profiling `Task Duration(us)` P50 and must not be
-compared directly with the stock V2 OM timing. The raw event samples, complete
-Host tiling data and kernel metadata selection are retained.
+Search `duration_us` and `samples_us` now come from profiler target-task
+`Task Duration(us)`, labelled `timing_method=kernel_task_duration_us`. Both the
+default V3 source baseline and every candidate use this same P50 metric.
+Selection, genetic ranking, Roofline and cache speedups never use Event time.
+Every trial profiles exactly the configured repeat count after correctness and
+warmup, finalizes capture, exports its CSV and validates a unique target identity.
+Missing, ambiguous or failed captures fail the candidate; there is no Event fallback.
+
+The raw worker `direct_result.json` retains Event measurements for diagnosis.
+Canonical search evidence is `trial.json` and `profile_result.json`; its
+`event_diagnostics` retains Event P50/samples with `under_profiler=true` and is
+not the unprofiled Event measurement from `--scope compare`. `profile_metrics.json`,
+`profile_inventory.json`, the raw CSVs and export command/log are retained per
+baseline/candidate. Block Dim zero remains explicitly unverified, never a match.
+The search metric is also explicit in reports and `trials.csv`.
+
+Historical result-cache identity includes the metric and a new format version,
+so old Event-based results cannot seed or short-circuit profiler-ranked search.
+Compiled OPP/device binaries are unchanged and remain reusable. Each trial now
+pays profiler initialization/export overhead, but no ATC conversion is performed
+for search candidates. Repeated init/finalize to select separate output paths
+follows the [CANN profiler lifecycle](https://www.hiascend.com/doc_center/source/zh/canncommercial/850/appdevg/acldevg/aclpythondevg_0077.html).
 
 Roofline and Dummy Agent remain in the search loop. Candidate ranking uses only
-direct V3 measurements against the default direct V3 source baseline. The stock
+direct V3 profiler task measurements against the default direct V3 source baseline. The stock
 V2 reference still uses OM. The winning parameters are independently checked in
 the existing ATC/OM path: V2 reference, default V3 and candidate V3 are measured
 in interleaved confirmation rounds with fresh ATC conversions, correctness and

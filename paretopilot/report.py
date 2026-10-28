@@ -11,7 +11,10 @@ def write_baseline_report(root, config, baseline):
     duration = baseline["duration_us"]
     note = "Baseline measurement only. Candidate tuning and speedup were not evaluated."
     if baseline.get("execution") == "kernel":
-        note += " Timing: device-event interval P50, including launch submission gaps; not OM Task Duration(us)."
+        if baseline.get("timing_method") == "kernel_task_duration_us":
+            note += " Timing: direct kernel profiler Task Duration(us) P50. Event intervals are diagnostic only."
+        else:
+            note += " Timing: device-event interval P50, including launch submission gaps; not OM Task Duration(us)."
     identity = baseline.get("operator_identity", {})
     routing = read_json(root/"routing.json") if (root/"routing.json").is_file() else {}
     observed = f'Observed operator: {identity.get("Op Type", "unavailable")}; node: {identity.get("Op Name", "unavailable")}. '
@@ -80,8 +83,10 @@ Confirmation compares interleaved fresh baseline/candidate builds. The range thr
     if result["mode"] == "simulation":
         text += "\nAll timings and correctness outcomes are synthetic. No hardware improvement has been measured.\n"
     if result.get("source_baseline", {}).get("execution") == "kernel":
+        profiler_search = result["source_baseline"].get("timing_method") == "kernel_task_duration_us"
         text = text.replace("Metric: OM target-op Task Duration(us) median.",
-                            "Search metric: direct kernel device-event interval P50 (includes launch submission gaps), not OM task duration. "
+                            ("Search metric: direct kernel profiler Task Duration(us) P50; Event intervals are diagnostic only. " if profiler_search else
+                             "Search metric: direct kernel device-event interval P50 (includes launch submission gaps), not OM task duration. ") +
                             "Stock reference and final confirmation use OM Task Duration(us) P50. Compare only timings from the same method.")
         text += "\nSearch uses a persistent direct kernel launcher; gain acceptance uses fresh ATC/OM confirmation only.\n"
     if "source_baseline" in result:
