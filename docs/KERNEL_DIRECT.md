@@ -80,6 +80,10 @@ integer forms such as `24.0` are accepted; a numeric mismatch, fractional value
 or malformed text is still rejected with its original value in the error.
 `kernel_profile/profile_metrics.json` records `block_dim_check` (observed values,
 matched/unavailable sample counts), and diagnosis marks incomplete verification.
+The observed raw-launch export value `0` (including `0.0`) is also retained as
+unverified metadata, with `zero_reported_samples` counted separately. This does
+not establish why zero was exported, a zero-block launch, or a profiler match
+to the positive Host dimension. Positive numeric mismatches still fail.
 
 After updating the parser, recover the most recent existing capture without
 ATC, kernel execution or re-export, using a command with no shell wildcards:

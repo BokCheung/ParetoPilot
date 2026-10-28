@@ -82,7 +82,7 @@ class ExecutionCompareTests(unittest.TestCase):
                 row["Block Dim"] = value
             result = direct_profile([self.csv(rows=rows)], 3, 24)
             self.assertEqual(result["block_dim_check"]["status"], "matched")
-        for value in ("", "N/A", "--", "unknown", None):
+        for value in ("", "N/A", "--", "unknown", None, "0", "0.0"):
             for row in rows:
                 if value is None:
                     row.pop("Block Dim", None)
@@ -91,9 +91,10 @@ class ExecutionCompareTests(unittest.TestCase):
             result = direct_profile([self.csv(rows=rows)], 3, 24)
             self.assertEqual(result["duration_us"], 8)
             self.assertEqual(result["block_dim_check"]["checked_samples"], 0)
+            self.assertEqual(result["block_dim_check"]["zero_reported_samples"], 3 if value in ("0", "0.0") else 0)
             self.assertTrue(any("profiler_block_dim_unavailable" in x for x in
                                 diagnose(self.trial(8), self.trial(250), result)["findings"]))
-        for value in ("12.0", "24.5", "NaN", "Infinity", "bad", "0", "-24"):
+        for value in ("12.0", "24.5", "NaN", "Infinity", "bad", "-24"):
             for row in rows:
                 row["Block Dim"] = value
             with self.assertRaisesRegex(TuningError, "Block Dim"):
@@ -115,7 +116,7 @@ class ExecutionCompareTests(unittest.TestCase):
         with path.open() as stream:
             rows = list(csv.DictReader(stream))
         for row in rows:
-            row["Block Dim"] = "N/A"
+            row["Block Dim"] = "0"
         self.csv(path.parent, rows)
         write_json(self.root/"new-but-incomplete/comparison.json", {"status": "failed"})
         self.assertEqual(latest_capture(self.root), root)
@@ -130,6 +131,8 @@ class ExecutionCompareTests(unittest.TestCase):
         self.assertNotIn("error", result)
         self.assertEqual(result["metrics"]["om_task_p50_us"], 8)
         self.assertEqual(result["metrics"]["kernel_task_p50_us"], 8)
+        self.assertEqual(result["kernel_profile"]["block_dim_check"]["observed"], ["0"])
+        self.assertEqual(result["kernel_profile"]["block_dim_check"]["zero_reported_samples"], 3)
         self.assertEqual(read_json(root/"comparison.json")["status"], "passed")
 
     def test_profiler_scope_stops_and_destroys_after_failure(self):

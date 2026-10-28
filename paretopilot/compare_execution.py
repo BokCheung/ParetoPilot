@@ -17,7 +17,7 @@ CORE_TASKS = {"AI_CORE", "AI_CUBE", "AI_CUBE_CORE", "AI_VECTOR_CORE", "MIX_AIC"}
 
 
 def check_block_dims(rows, expected):
-    observed, checked, unavailable = [], 0, 0
+    observed, checked, unavailable, zero_reported = [], 0, 0, 0
     for row in rows:
         raw = row.get("Block Dim")
         value = "" if raw is None else str(raw).strip()
@@ -28,15 +28,22 @@ def check_block_dims(rows, expected):
             continue
         try:
             number = Decimal(value)
-            if not number.is_finite() or number <= 0 or number != number.to_integral_value():
+            if not number.is_finite() or number < 0 or number != number.to_integral_value():
                 raise ValueError()
         except (InvalidOperation, ValueError) as exc:
             raise TuningError(f"Invalid profiler Block Dim {raw!r}; expected integer {expected} or an unavailable marker") from exc
+        if number == 0:
+            # Preserve zero as unverified profiler metadata, never as a match
+            # to the positive Host launch dimension or proof of a zero launch.
+            zero_reported += 1
+            unavailable += 1
+            continue
         if number != expected:
             raise TuningError(f"Direct profiler Block Dim {raw!r} differs from Host tiling {expected}")
         checked += 1
     return {"status": "matched" if not unavailable else "partial" if checked else "unavailable",
-            "expected": expected, "observed": observed, "checked_samples": checked, "unavailable_samples": unavailable}
+            "expected": expected, "observed": observed, "checked_samples": checked,
+            "unavailable_samples": unavailable, "zero_reported_samples": zero_reported}
 
 
 def direct_profile(paths, repeats, block_dim):
