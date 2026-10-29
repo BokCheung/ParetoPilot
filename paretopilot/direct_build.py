@@ -25,7 +25,7 @@ def fp16_config(config):
         inputs, outputs = item["inputs"], item["outputs"]
         if (all(x["dtype"] == "float16" and x["format"] == "ND" for x in inputs[:3])
                 and all(x["dtype"] == "float16" and x["format"] == "ND" for x in outputs)
-                and all(a["value"] is False for a in item["attrs"] if a["name"] in ("adj_x1", "adj_x2"))):
+                and all(a["value"] is False for a in item.get("attrs", []) if a["name"] in ("adj_x1", "adj_x2"))):
             selected.append(item)
     if len(selected) != 1:
         raise TuningError(f"Expected one official FP16/ND binary configuration, found {len(selected)}")
@@ -65,6 +65,12 @@ def build_kernels(config, result, directory, env):
         record = run_command(command, project, directory/(name+".log"), config["measurement"]["timeout_s"], build_env)
         write_json(directory/(name+".command.json"), record)
     root = build/"binary/ascend910b/bin/ascend910b/batch_mat_mul_v3"
+    result["kernel_catalogs"] = collect_catalogs(root)
+    return build_launcher(config, result, directory, env)
+
+
+def collect_catalogs(root):
+    root = Path(root)
     catalogs = []
     for path in sorted(root.rglob("*.json")):
         meta = read_json(path)
@@ -79,6 +85,10 @@ def build_kernels(config, result, directory, env):
                          "binary": str(binary), "binary_sha256": file_hash(binary)})
     if len(catalogs) != 1:
         raise TuningError(f"Expected one FP16/ND kernel catalog at {root}, found {len(catalogs)}; see kernel-build.log")
+    return catalogs
+
+
+def build_launcher(config, result, directory, env):
     roots = [Path(env[k]) for k in ("ASCEND_HOME_PATH", "ASCEND_TOOLKIT_HOME") if env.get(k)]
     roots = [p for root in roots for p in (root, root/"aarch64-linux", root/"x86_64-linux")]
     include = next((p/"include" for p in roots if (p/"include/acl/acl.h").is_file()), None)
@@ -89,10 +99,9 @@ def build_kernels(config, result, directory, env):
     command = ["g++", "-std=c++17", "-shared", "-fPIC", "-O2",
                str(Path(__file__).parent/"official_adapter/direct_launcher.cpp"),
                "-I"+str(include), "-L"+str(lib), "-Wl,-rpath,"+str(lib), "-lascendcl", "-o", str(launcher)]
-    record = run_command(command, project, directory/"launcher-build.log", config["measurement"]["timeout_s"], env)
+    record = run_command(command, Path(result["source_dir"]), directory/"launcher-build.log", config["measurement"]["timeout_s"], env)
     write_json(directory/"launcher-build.command.json", record)
     result.update(launcher_library=str(launcher), launcher_sha256=file_hash(launcher))
-    result["kernel_catalogs"] = catalogs
     return result
 
 

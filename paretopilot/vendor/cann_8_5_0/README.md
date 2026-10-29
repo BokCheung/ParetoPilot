@@ -1,5 +1,13 @@
 # Vendored CANN 8.5.0 MatMulV3
 
+Also included: `ops-math-add-v2.zip`, exported with `git archive` from ops-math
+tag `v8.5.0`, commit `f1a42c5381bbd33981877ad87751d242663c2ce6`.
+`add_manifest.json` records its checksum and experimental/community status.
+It contains unchanged root LICENSE/CMake and the common/cmake/scripts/AddV2
+subtrees needed for the isolated build. It is not installed stock Add source.
+Device files remain unchanged after extraction; integration and Host-control
+patches are recorded separately. See `docs/OFFICIAL_ADD.md` in the project.
+
 Upstream: https://gitcode.com/cann/ops-nn, branch `8.5.0`, commit
 `9f8a66e795ef1842c2118cf5bbadfe3624bdd1ef`.
 

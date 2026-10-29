@@ -1,7 +1,7 @@
 import math
 from pathlib import Path
 from .util import TuningError, number, read_json
-from .official import KIND, BATCH_KIND, batch_enabled, enabled as official_enabled
+from .official import KIND, BATCH_KIND, ADD_KIND, add_enabled, batch_enabled, enabled as official_enabled
 from .workload import BASELINE_ONLY, baseline_only
 
 
@@ -20,8 +20,8 @@ def load_config(path):
         if op["kind"] not in ("matmul", "add") or op["dtype"] not in ("float16", "float32"):
             raise TuningError("V1 supports matmul/add with float16/float32")
         implementation = c.get("implementation", {"kind": "bundled"})
-        if not isinstance(implementation, dict) or implementation.get("kind") not in ("bundled", KIND, BATCH_KIND, BASELINE_ONLY):
-            raise TuningError("implementation.kind must be bundled, cann_matmul_v3, cann_batch_matmul_v3 or baseline_only")
+        if not isinstance(implementation, dict) or implementation.get("kind") not in ("bundled", KIND, BATCH_KIND, ADD_KIND, BASELINE_ONLY):
+            raise TuningError("implementation.kind must be bundled, cann_matmul_v3, cann_batch_matmul_v3, cann_add_v2 or baseline_only")
         if type(implementation.get("require_same_operator", True)) is not bool:
             raise TuningError("implementation.require_same_operator must be a boolean")
         if type(implementation.get("build_cache", True)) is not bool:
@@ -29,9 +29,9 @@ def load_config(path):
         execution = implementation.get("execution", "om")
         if execution not in ("om", "kernel"):
             raise TuningError("implementation.execution must be om or kernel")
-        if execution == "kernel" and (implementation["kind"] != "cann_batch_matmul_v3"
+        if execution == "kernel" and (implementation["kind"] not in (BATCH_KIND, ADD_KIND)
                                       or c["backend"] != "ascend" or not implementation.get("build_cache", True)):
-            raise TuningError("Kernel execution requires Ascend BatchMatMulV3 and build_cache=true")
+            raise TuningError("Kernel execution requires Ascend BatchMatMulV3/AddV2 and build_cache=true")
         if "cache_dir" in implementation:
             if not isinstance(implementation["cache_dir"], str) or not implementation["cache_dir"]:
                 raise TuningError("implementation.cache_dir must be a nonempty path")
@@ -48,12 +48,16 @@ def load_config(path):
             if not baseline and not batch_enabled(c):
                 raise TuningError("3D MatMul requires baseline_only or cann_batch_matmul_v3")
         official = official_enabled(c)
-        if official and (c["backend"] != "ascend" or op["kind"] != "matmul" or op["dtype"] != "float16"):
+        if official and (c["backend"] != "ascend" or op["kind"] != ("add" if add_enabled(c) else "matmul") or op["dtype"] != "float16"):
             raise TuningError("Official MatMul currently requires Ascend FP16 MatMul")
         if official:
             number(implementation.get("build_jobs", 4), "build_jobs", 1, True)
-            if not batch_enabled(c) and any(op[k] % 16 for k in ("m", "n", "k")):
+            if not batch_enabled(c) and not add_enabled(c) and any(op[k] % 16 for k in ("m", "n", "k")):
                 raise TuningError("Official MatMul acceptance currently requires M/N/K multiples of 16")
+            if add_enabled(c) and (op["numel"] % 16 or op["numel"] > 2147483647):
+                raise TuningError("Unmodified official AddV2 requires FP16 numel divisible by 16 and <= int32; use stock/bundled for unaligned Add")
+            if add_enabled(c) and not implementation.get("build_cache", True):
+                raise TuningError("Official AddV2 requires build_cache=true for its verified runtime-parameter package")
         for key in (("m", "n", "k") if op["kind"] == "matmul" else ("numel",)):
             number(op[key], key, 1, True)
         for key in ("peak_flops", "bandwidth_bytes_s", "local_memory_bytes", "max_blocks", "alignment"):
@@ -67,7 +71,7 @@ def load_config(path):
                 raise TuningError(f"Duplicate values: {key}")
         required = {"tile_m", "tile_n", "tile_k", "buffers", "block_dim"} if op["kind"] == "matmul" else {"tile_elems", "buffers", "block_dim"}
         if official:
-            required = {"core_limit", "tiling_policy"}
+            required = {"core_limit", "tile_elems"} if add_enabled(c) else {"core_limit", "tiling_policy"}
             if batch_enabled(c):
                 required.add("batch_strategy")
                 if "base_m" in c["space"] or "base_n" in c["space"]:
@@ -76,9 +80,14 @@ def load_config(path):
             required = set()
         if set(c["space"]) != required:
             raise TuningError(f"Template requires parameters {sorted(required)}")
-        if official and (any(v > min(24, c["hardware"]["max_blocks"]) for v in c["space"]["core_limit"])
+        if official and not add_enabled(c) and (any(v > min(24, c["hardware"]["max_blocks"]) for v in c["space"]["core_limit"])
                          or any(v not in (0, 1) for v in c["space"]["tiling_policy"])):
             raise TuningError("Official MatMul: core_limit must fit the configured AI Core limit (0=auto); tiling_policy must be 0 or 1")
+        if add_enabled(c):
+            from .official_add import validate_params as validate_add
+            for core in c["space"]["core_limit"]:
+                for tile in c["space"]["tile_elems"]:
+                    validate_add({"core_limit": core, "tile_elems": tile})
         if batch_enabled(c) and any(v not in (0, 1) for v in c["space"]["batch_strategy"]):
             raise TuningError("batch_strategy must be 0 (upstream) or 1 (common)")
         if batch_enabled(c) and "base_m" in c["space"]:

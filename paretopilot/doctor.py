@@ -5,7 +5,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from .official import enabled as official_enabled, verify_bundle, legacy_library
+from .official import enabled as official_enabled, add_enabled, verify_bundle, legacy_library
 from .util import TuningError
 from .workload import baseline_only
 
@@ -26,13 +26,18 @@ def inspect_environment(config):
         commands.append(a.get("msopgen", "msopgen"))
     else:
         try:
-            add("official_source", True, verify_bundle()["commit"])
+            if add_enabled(config):
+                from .official_add import verify_bundle as verify_add
+                add("official_source", True, verify_add()["commit"])
+            else:
+                add("official_source", True, verify_bundle()["commit"])
         except (TuningError, OSError) as exc:
             add("official_source", False, str(exc))
-        try:
-            add("official_legacy_library", True, str(legacy_library(os.environ)[0]))
-        except (TuningError, OSError) as exc:
-            add("official_legacy_library", False, str(exc))
+        if not add_enabled(config):
+            try:
+                add("official_legacy_library", True, str(legacy_library(os.environ)[0]))
+            except (TuningError, OSError) as exc:
+                add("official_legacy_library", False, str(exc))
     for command in commands:
         path = shutil.which(command)
         add(command, path is not None, path or "Not on PATH; source CANN set_env.sh and install development tools")

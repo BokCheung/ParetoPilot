@@ -6,7 +6,7 @@
 
 流程：PyTorch 正确性参考与 ONNX 导出 → stock 性能参照 → 默认 V3 源码基线 → 真实平台与 shape 生成参数域 → Roofline →
 Dummy Agent 调整参数域 → 历史参数复测/遗传搜索 → 同源候选 → 三路交错复测 → 报告与结果缓存。
-Add 保留原有 Ascend C 模板。
+Add 新增 CANN 8.5.0 官方仓库的实验性 AddV2 同源调优路线，并提供 stock Add 安装源码定位入口；二者不混称同一实现。
 
 ## 支持范围
 
@@ -23,7 +23,10 @@ Add 保留原有 Ascend C 模板。
 示例默认启用 `search.domain_mode="shape"`：修改 operator 中的 shape 后自动重建参数域，无需手动修改 space。
 相同 shape 的历史最优参数先复测，相近 shape 只作预热候选；最终仍执行新的 OM 确认。
 用 `--fresh-search` 忽略历史参数并保留编译缓存；用 `search.domain_mode="manual"` 恢复静态参数域。
-Add 支持任意正整数 numel 和尾块，参数为 `tile_elems`、`buffers`、`block_dim`。
+AddV2 示例为 FP16、相同输入 shape、`numel=1048576`，要求元素数为 16 的倍数，以保留原始 Device 源码。
+参数是 `core_limit`、`tile_elems`，默认均为 0（官方默认推导）；直调按 profiler 目标任务 P50 排名，最终走 OM 确认。
+旧 PpAdd 模板及非对齐尾块路径仍可显式选 `--add-implementation bundled`。
+stock Add 路线先测量并收集安装包实际编译分支，尚未宣称已支持其源码 tiling 寻优。命令与边界见 [Add 两条路线](docs/OFFICIAL_ADD.md)。
 
 官方源码与离线构建依赖已随 GitHub 仓库打包。**本地没有 CANN/NPU；源码编译、精度和性能仍需在
 910B2 上验收。** 构建依赖、源码适配范围和控制点见 [BatchMatMulV3 源码调优](docs/OFFICIAL_BATCHMATMUL.md)。

@@ -1,6 +1,6 @@
 import itertools
 from .workload import baseline_only
-from .official import enabled as official_enabled, batch_enabled, validate_params
+from .official import enabled as official_enabled, batch_enabled, add_enabled, validate_params
 from .util import TuningError
 
 
@@ -13,7 +13,7 @@ def legal(p, config):
             validate_params(p, batch=batch_enabled(config))
         except TuningError:
             return False
-        if p["core_limit"] > min(24, hw["max_blocks"]):
+        if p["core_limit"] > min(48 if add_enabled(config) else 24, hw["max_blocks"]):
             return False
         if p.get("base_m", 0):
             if op["k"] > 65535 or op["n"] > 65535:

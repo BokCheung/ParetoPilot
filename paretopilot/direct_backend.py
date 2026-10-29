@@ -12,7 +12,7 @@ import time
 
 from .backend import AscendBackend, environment
 from .build import build_candidate
-from .official import BATCH_DEFAULT_PARAMS, COMMIT, validate_params
+from .official import default_params, source_commit, source_operator, validate_params
 from .kernel_profiling import direct_profile
 from .profiling import inspect_profiles
 from .util import TuningError, digest, file_hash, read_json, tree_hash, write_json
@@ -29,10 +29,10 @@ def validate_result(result, config, params, build):
             or result.get("correctness", {}).get("passed") is not True
             or result.get("correctness", {}).get("simulated", False)
             or result.get("input_shapes") != inputs or result.get("output_shape") != output
-            or result.get("operator_identity", {}).get("Op Type") != "BatchMatMulV3"
+            or result.get("operator_identity", {}).get("Op Type") != source_operator(config)
             or len(samples) != config["measurement"]["repeats"]
             or any(type(x) not in (float, int) or not math.isfinite(x) or x <= 0 for x in samples)
-            or selection.get("commit") != COMMIT or selection.get("params_sha256") != digest(params)
+            or selection.get("commit") != source_commit(config) or selection.get("params_sha256") != digest(params)
             or selection.get("params") != params or not selection.get("effective_tiling")
             or selection.get("installed_sha256") != build["installed_sha256"]):
         raise TuningError("Invalid direct kernel correctness/timing/shape/source evidence")
@@ -88,9 +88,9 @@ class KernelBackend(AscendBackend):
     def start(self):
         prepare = self.root/"direct_prepare"
         prepare.mkdir()
-        self.build = build_candidate(self.c, BATCH_DEFAULT_PARAMS.copy(), prepare, environment())
+        self.build = build_candidate(self.c, default_params(self.c), prepare, environment())
         if self.build.get("parameter_binding") != "atc_process_environment" or not self.build.get("kernel_catalogs"):
-            raise TuningError("Kernel backend requires a cached runtime-parameter OPP with compiled device binaries")
+            raise TuningError("Kernel backend requires a cached runtime-parameter source OPP with compiled device binaries")
         ready = prepare/"ready.json"
         request = prepare/"bootstrap.json"
         write_json(request, {"config": self.c, "build": self.build, "case": str(self.case), "ready": str(ready)})

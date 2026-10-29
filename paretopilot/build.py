@@ -2,10 +2,12 @@
 from pathlib import Path
 import shutil
 from .util import TuningError, digest, read_json, run_command, tree_hash, write_json
-from .official import enabled as official_enabled, batch_enabled, build_official
+from .official import enabled as official_enabled, batch_enabled, add_enabled, build_official
 
 
 def op_names(config):
+    if add_enabled(config):
+        return "ParetoPilotOfficialAddV2", "add_v2"
     if batch_enabled(config):
         return "ParetoPilotOfficialBatchMatMul", "batch_mat_mul_v3"
     if official_enabled(config):

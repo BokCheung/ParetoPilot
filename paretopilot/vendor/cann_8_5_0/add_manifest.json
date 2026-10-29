@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/hicann/ops-math",
+  "tag": "v8.5.0",
+  "commit": "f1a42c5381bbd33981877ad87751d242663c2ce6",
+  "operator": "AddV2",
+  "source_path": "experimental/math/add_v2",
+  "status": "community-contributed experimental implementation; not stock Add",
+  "archives": {
+    "ops-math-add-v2.zip": "8623d9f29e4f81b87186f05c452eff37226d1081da7dd2c95fbe311ea2da71eb"
+  }
+}

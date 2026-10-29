@@ -24,6 +24,7 @@ class ScriptTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.args = script.parser().parse_args(["--cann-path", str(self.root/"cann"), "--soc", "Ascend910B2", "--device", "3", "--matmul-implementation", "legacy"])
+        self.args.add_implementation = "bundled"  # Existing bundled-Add fixtures.
 
     def make_cann(self, directory, version="8.5.0"):
         directory.mkdir(parents=True)

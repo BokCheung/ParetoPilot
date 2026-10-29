@@ -18,7 +18,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from paretopilot.config import load_config
-from paretopilot.official import enabled as official_enabled, batch_enabled, default_params, COMMIT
+from paretopilot.official import enabled as official_enabled, primary_source as batch_enabled, add_enabled, source_operator, source_commit, default_params, COMMIT
 from paretopilot.search import confirmation_roles
 from paretopilot.workload import baseline_only, shapes
 from paretopilot.routing import same_operator
@@ -46,10 +46,12 @@ def parser():
     p.add_argument("--soc", required=True, help="Exact target SoC, e.g. Ascend910B1; check npu-smi")
     p.add_argument("--device", type=nonnegative, default=0)
     p.add_argument("--operator", choices=("all", "matmul", "add"), default="all", help="Select hardware acceptance stages")
+    p.add_argument("--add-implementation", choices=("add-v2", "bundled", "stock"), default="add-v2", help="AddV2 official experimental source; bundled is the old PpAdd; stock is inspection-only")
+    p.add_argument("--add-execution", choices=("om", "kernel"), default="kernel")
     p.add_argument("--matmul-implementation", choices=("batch-v3", "legacy"), default="batch-v3", help="Default: BatchMatMulV3 source baseline and Host tiling; legacy retains earlier MatMulV3/baseline-only cases")
     p.add_argument("--matmul-execution", choices=("om", "kernel"), default="om", help="Kernel: persistent direct V3 search, fresh OM confirmation; batch-v3 only")
     p.add_argument("--matmul-case", choices=("2d", "shared_rhs", "batched_rhs", "3d", "all"), default="2d", help="Choose 2D/3D workloads; batch-v3 tunes all cases, legacy 3D cases are baseline-only")
-    p.add_argument("--scope", choices=("smoke", "full", "compare"), default="full", help="Batch-v3: smoke checks source; full searches/confirms; compare profiles default V3 through OM and direct kernel without tuning")
+    p.add_argument("--scope", choices=("smoke", "full", "compare", "inspect"), default="full", help="smoke/full source tests; compare profiles V3; inspect locates stock Add's installed compile branch")
     p.add_argument("--deps", choices=("install", "offline", "check"), default="install", help="install/offline use an isolated venv; check uses this interpreter without installing dependencies")
     p.add_argument("--wheelhouse", type=Path, help="Local wheels for --deps offline")
     p.add_argument("--venv", type=Path, default=ROOT/".venv-910b", help="Reusable venv for install/offline; must match this Python version")
@@ -206,6 +208,8 @@ def prepare_configs(args, output):
     configs = {}
     for kind, filename in workload_cases(args):
         config = load_config(args.config_dir/filename)
+        if kind == "add" and args.add_implementation == "stock":
+            config["operator"]["numel"] = 1048576  # Same workload as the AddV2 source example.
         if args.matmul_execution == "kernel" and kind.startswith("matmul") and not batch_enabled(config):
             raise TuningError("--matmul-execution kernel requires --matmul-implementation batch-v3")
         if config["backend"] != "ascend" or config["operator"]["kind"] != kind.split("-")[0]:
@@ -223,14 +227,14 @@ def prepare_configs(args, output):
             if args.fresh_search:
                 config["search"]["reuse_results"] = False
             config["implementation"]["build_cache"] = not args.no_build_cache
-            config["implementation"]["execution"] = args.matmul_execution
+            config["implementation"]["execution"] = args.add_execution if add_enabled(config) else args.matmul_execution
             if args.build_cache:
                 config["implementation"]["cache_dir"] = str(args.build_cache.expanduser().resolve())
         smoke = deepcopy(config)
         smoke["space"] = {name: [values[0]] for name, values in config["space"].items()}
         if official_enabled(config):
             smoke["space"] = {k: [v] for k, v in default_params(config).items()}
-            if batch_enabled(config) and "base_m" in config["space"]:
+            if batch_enabled(config) and ("base_m" in config["space"] or add_enabled(config)):
                 # Source smoke also verifies one explicit-tile candidate.
                 smoke["space"] = deepcopy(config["space"])
         else:
@@ -252,7 +256,7 @@ def workload_cases(args):
     matmul_stem = "batchmatmul" if args.matmul_implementation == "batch-v3" else "matmul"
     for kind in operator_kinds(args):
         if kind == "add":
-            cases.append((kind, "ascend910b_add.json"))
+            cases.append((kind, "ascend910b_add_v2.json" if args.add_implementation == "add-v2" else "ascend910b_add.json"))
             continue
         if args.matmul_case in ("2d", "all"):
             cases.append((kind, f"ascend910b_{matmul_stem}.json"))
@@ -297,24 +301,27 @@ def verify_result(directory, smoke):
         if (not smoke or not batch_enabled(config) or result.get("mode") != "ascend"
                 or result.get("status") != "smoke_passed" or not valid(trial)
                 or trial.get("role") != "source_baseline" or trial.get("params") != default_params(config)
-                or trial.get("operator_identity", {}).get("Op Type") != "BatchMatMulV3"
+                or trial.get("operator_identity", {}).get("Op Type") != source_operator(config)
                 or trial.get("input_shapes") != inputs or trial.get("output_shape") != output
                 or len(trial.get("samples_us", [])) != config["measurement"]["repeats"]
-                or selection.get("commit") != COMMIT or selection.get("operator") != "BatchMatMulV3"
+                or selection.get("commit") != source_commit(config) or selection.get("operator") != source_operator(config)
                 or not selection.get("effective_tiling")):
             raise TuningError(f"{directory.name}: invalid BatchMatMulV3 source smoke evidence")
         from paretopilot.space import enumerate_space
-        tile_params = next((p for p in enumerate_space(config) if p.get("base_m", 0)), None)
+        tile_params = next((p for p in enumerate_space(config) if (p != default_params(config) if add_enabled(config) else p.get("base_m", 0))), None)
         if tile_params is not None:
             tile = result.get("tile_smoke", {})
+            def tile_mismatch(record):
+                if add_enabled(config):
+                    return bool(tile_params["tile_elems"]) and record.get("tile_data_num") != tile_params["tile_elems"]
+                return record.get("base_m") != tile_params["base_m"] or record.get("base_n") != tile_params["base_n"]
             if (not valid(tile) or tile.get("role") != "candidate" or tile.get("params") != tile_params
-                    or tile.get("operator_identity", {}).get("Op Type") != "BatchMatMulV3"
+                    or tile.get("operator_identity", {}).get("Op Type") != source_operator(config)
                     or tile.get("input_shapes") != inputs or tile.get("output_shape") != output
                     or len(tile.get("samples_us", [])) != config["measurement"]["repeats"]
-                    or (tile.get("selection") or {}).get("commit") != COMMIT
+                    or (tile.get("selection") or {}).get("commit") != source_commit(config)
                     or not (tile.get("selection") or {}).get("effective_tiling")
-                    or any(r.get("base_m") != tile_params["base_m"] or r.get("base_n") != tile_params["base_n"]
-                           for r in (tile.get("selection") or {}).get("effective_tiling", []))):
+                    or any(tile_mismatch(r) for r in (tile.get("selection") or {}).get("effective_tiling", []))):
                 raise TuningError(f"{directory.name}: invalid explicit baseM/baseN smoke evidence")
         if config["implementation"].get("execution") == "kernel" and any(
                 t.get("timing_method") != "kernel_task_duration_us"
@@ -345,7 +352,7 @@ def verify_result(directory, smoke):
         raise TuningError(f"{directory.name}: incomplete or failed confirmation; inspect confirmation/")
     if official_enabled(config):
         source_trials = [result["source_baseline"], *good, *(t for t in confirmation if t["role"] != "baseline")]
-        if any(t.get("selection", {}).get("commit") != COMMIT or not t.get("selection", {}).get("effective_tiling") for t in source_trials):
+        if any(t.get("selection", {}).get("commit") != source_commit(config) or not t.get("selection", {}).get("effective_tiling") for t in source_trials):
             raise TuningError(f"{directory.name}: official source identity/effective tiling evidence missing")
     if batch_enabled(config):
         if config["implementation"].get("execution") == "kernel":
@@ -359,16 +366,16 @@ def verify_result(directory, smoke):
         all_trials = [result["baseline"], result["source_baseline"], *good, *confirmation]
         from paretopilot.profiling import MATMUL_TYPES
         stock_type = result["baseline"].get("operator_identity", {}).get("Op Type")
-        if stock_type not in MATMUL_TYPES:
+        if stock_type not in ({"Add"} if add_enabled(config) else MATMUL_TYPES):
             raise TuningError(f"{directory.name}: stock MatMul identity missing")
         for trial in all_trials:
-            expected_op = stock_type if trial.get("role") == "baseline" else "BatchMatMulV3"
+            expected_op = stock_type if trial.get("role") == "baseline" else source_operator(config)
             inputs, output = shapes(config["operator"])
             if (trial.get("operator_identity", {}).get("Op Type") != expected_op
                     or trial.get("input_shapes") != inputs or trial.get("output_shape") != output
                     or len(trial.get("samples_us", [])) != config["measurement"]["repeats"]):
                 raise TuningError(f"{directory.name}: BatchMatMulV3 shape/operator/sample evidence invalid")
-            if trial.get("role") != "baseline" and trial["selection"].get("operator") != "BatchMatMulV3":
+            if trial.get("role") != "baseline" and trial["selection"].get("operator") != source_operator(config):
                 raise TuningError(f"{directory.name}: wrong official source operator")
     return {"status": "passed", "successful_candidates": len(good), "failed_candidates": len(history)-len(good),
             "selected": result["selected"], "selected_params": result["selected_params"],
@@ -394,6 +401,28 @@ def execute_suite(session, args, python, configs):
         session.run("python-packages", [python, "-c", "from importlib.metadata import distributions; print('\\n'.join(sorted(d.metadata['Name']+'=='+d.version for d in distributions() if d.metadata['Name'])))"])
     for kind in kinds:
         session.run("validate-"+kind, cli+["validate", "--config", str(configs[kind])])
+    if args.scope == "inspect":
+        directory = session.root/"add-stock-baseline"
+        session.run("add-stock-baseline", cli+["baseline", "--config", str(configs["add"]), "--output", str(directory)])
+        verified = verify_baseline_result(directory)
+        diagnostic = session.root/"stock-add-inspect"
+        session.run("stock-add-inspect", [python, str(ROOT/"scripts/inspect_cann_operator.py"), "--operator", "Add",
+                    "--cann-path", str(args.cann_path), "--baseline-dir", str(directory), "--output", str(diagnostic),
+                    "--no-strace", "--timeout", str(args.timeout), *(["--cann-env", str(args.cann_env)] if args.cann_env else [])])
+        inventory = read_json(diagnostic/"registration-and-sources.json")
+        brief = {"operator": "Add", "tuning_supported": False,
+                 "registrations_910b": [{"path": r["path"], "entry": {k: r["entry"][k] for k in ("opFile", "opInterface", "dynamicShapeSupport", "prebuildPattern") if k in r["entry"]}}
+                                       for r in inventory["registrations"] if "ascend910b" in r["path"].lower()],
+                 "source_candidates": [{k: r[k] for k in ("path", "sha256", "size")} for r in inventory["candidate_files"] if r["path"].endswith("add.py")][:12],
+                 "evidence": str(diagnostic/"report.json"),
+                 "note": "Registration matches are candidates, not proof of execution. Inspect target compile branch before choosing a source adapter or kernel ABI."}
+        write_json(diagnostic/"brief.json", brief)
+        verified.update(scope="stock_source_inspection", tuning_supported=False,
+                        reason="Stock Add compile-entry evidence collected; no source tiling adapter or direct ABI inferred without inspecting the installed branch",
+                        source_evidence=str(diagnostic/"brief.json"))
+        session.data["results"]["add-stock-baseline"] = verified
+        session.save()
+        return
     if args.scope == "compare":
         for kind in kinds:
             name = kind+"-compare"
@@ -469,6 +498,10 @@ def main(argv=None):
         p.error("--soc must be the exact Ascend910B variant")
     if args.operator == "add" and args.matmul_case != "2d":
         p.error("--matmul-case requires --operator matmul or all")
+    if args.scope == "inspect" and (args.operator != "add" or args.add_implementation != "stock"):
+        p.error("--scope inspect requires --operator add --add-implementation stock")
+    if args.add_implementation == "stock" and args.scope != "inspect":
+        p.error("Stock Add source tuning needs installed branch evidence first; use --scope inspect")
     if args.scope == "compare" and (args.operator != "matmul" or args.matmul_implementation != "batch-v3" or args.no_build_cache):
         p.error("--scope compare requires --operator matmul, --matmul-implementation batch-v3 and build cache enabled")
     if args.deps == "offline" and (args.wheelhouse is None or not args.wheelhouse.is_dir()):

@@ -16,6 +16,7 @@ from .util import TuningError, digest, file_hash, read_json, run_command, tree_h
 COMMIT = "9f8a66e795ef1842c2118cf5bbadfe3624bdd1ef"
 KIND = "cann_matmul_v3"
 BATCH_KIND = "cann_batch_matmul_v3"
+ADD_KIND = "cann_add_v2"
 DEFAULT_PARAMS = {"core_limit": 0, "tiling_policy": 0}
 BATCH_DEFAULT_PARAMS = {**DEFAULT_PARAMS, "batch_strategy": 0}
 TILE_DEFAULT_PARAMS = {"base_m": 0, "base_n": 0}
@@ -28,14 +29,36 @@ BATCH_INFER = "matmul/batch_mat_mul_v3/op_host/batch_mat_mul_v3_infershape.cpp"
 
 
 def enabled(config):
-    return config.get("implementation", {}).get("kind") in (KIND, BATCH_KIND)
+    return config.get("implementation", {}).get("kind") in (KIND, BATCH_KIND, ADD_KIND)
 
 
 def batch_enabled(config):
     return config.get("implementation", {}).get("kind") == BATCH_KIND
 
 
+def add_enabled(config):
+    return config.get("implementation", {}).get("kind") == ADD_KIND
+
+
+def primary_source(config):
+    return batch_enabled(config) or add_enabled(config)
+
+
+def source_operator(config):
+    return "AddV2" if add_enabled(config) else "BatchMatMulV3" if batch_enabled(config) else "MatMulV3"
+
+
+def source_commit(config):
+    if add_enabled(config):
+        from .official_add import COMMIT as add_commit
+        return add_commit
+    return COMMIT
+
+
 def default_params(config):
+    if add_enabled(config):
+        from .official_add import DEFAULT_PARAMS as add_defaults
+        return add_defaults.copy()
     params = (BATCH_DEFAULT_PARAMS if batch_enabled(config) else DEFAULT_PARAMS).copy()
     if batch_enabled(config) and "base_m" in config["space"]:
         params.update(TILE_DEFAULT_PARAMS)
@@ -60,6 +83,9 @@ def legacy_library(env):
 
 
 def validate_params(params, batch=False):
+    if "tile_elems" in params:
+        from .official_add import validate_params as validate_add
+        return validate_add(params)
     expected = set(BATCH_DEFAULT_PARAMS if batch else DEFAULT_PARAMS)
     if (set(params) not in (expected, expected | set(TILE_DEFAULT_PARAMS) if batch else expected) or any(type(v) is not int for v in params.values())
             or not 0 <= params["core_limit"] <= 24 or params["tiling_policy"] not in (0, 1)
@@ -340,6 +366,9 @@ def verify_installed_implementations(generated, vendor):
 
 
 def build_official(config, params, directory, env):
+    if add_enabled(config):
+        from .official_add import build
+        return build(config, params, directory, env)
     if batch_enabled(config) and config["implementation"].get("build_cache", True):
         from .official_cache import cached_build
         return cached_build(config, params, directory, env)
@@ -403,6 +432,9 @@ def _build_official(config, params, directory, env, *, runtime=False):
 
 
 def read_effective_tiling(log, params, batch=False):
+    if "tile_elems" in params:
+        from .official_add import read_effective_tiling as read_add
+        return read_add(log, params)
     text = Path(log).read_text(encoding="utf-8", errors="replace")
     if f"PARETOPILOT_OFFICIAL={COMMIT}" not in text:
         raise TuningError("ATC did not execute the pinned official MatMul Host tiler")

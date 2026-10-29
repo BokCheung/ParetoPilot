@@ -22,6 +22,14 @@ OPERATOR = "BatchMatMulV2"
 OP_MATCH = re.compile(r"(?<![A-Za-z])(?:BatchMatMulV2|batch_?mat_?mul_?v2)(?![A-Za-z])", re.I)
 MATCH = re.compile(r"(?<![A-Za-z])(?:BatchMatMulV2|batch_?mat_?mul_?v2)(?![A-Za-z])|oppath|op_compile_stats|"
                    r"kernel.?name|tiling.?key|opFile|opInterface|reuse (?:binary|disk|task)|dispatch online", re.I)
+_BMM_PATTERN = OP_MATCH.pattern
+
+
+def select_operator(name):
+    global OPERATOR, OP_MATCH, MATCH
+    OPERATOR = name
+    OP_MATCH = re.compile(r"(?<![A-Za-z0-9_])Add(?![A-Za-z0-9_])" if name == "Add" else _BMM_PATTERN, re.I)
+    MATCH = re.compile(OP_MATCH.pattern+r"|oppath|op_compile_stats|kernel.?name|tiling.?key|opFile|opInterface|reuse (?:binary|disk|task)|dispatch online", re.I)
 
 
 def installed_files(roots, warnings):
@@ -78,7 +86,7 @@ def python_details(path):
 def inspect_installation(roots, warnings):
     files = list(installed_files(roots, warnings))
     registrations, priority = [], []
-    stems = {"batch_matmul_v2", "batch_mat_mul_v2", "batch_matmul"}
+    stems = {"add"} if OPERATOR == "Add" else {"batch_matmul_v2", "batch_mat_mul_v2", "batch_matmul"}
     for path in files:
         if path.name == "config.ini" and path.parent.name == "vendors":
             priority.append({"path": str(path), "text": path.read_text(errors="replace")[:16384]})
@@ -218,7 +226,7 @@ def baseline_node_names(output):
         except Exception as exc:
             return [], f"Cannot parse recorded baseline ONNX: {exc}"
         names = sorted({node.name for node in graph.node if node.name and
-                        node.op_type in ("MatMul", "Gemm", "BatchMatMul", "BatchMatMulV2")})
+                        node.op_type in ("MatMul", "Gemm", "BatchMatMul", "BatchMatMulV2", "Add")})
         return names, None
     except (OSError, TuningError, KeyError, ImportError, ValueError) as exc:
         return [], str(exc)
@@ -310,6 +318,7 @@ def summarize(output, branches_only=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--operator", choices=("BatchMatMulV2", "Add"), default="BatchMatMulV2")
     parser.add_argument("--cann-path", type=Path)
     parser.add_argument("--cann-env", type=Path)
     parser.add_argument("--baseline-dir", type=Path, help="Existing stock baseline/ with atc.command.json")
@@ -320,7 +329,10 @@ def main(argv=None):
     parser.add_argument("--no-strace", action="store_true")
     parser.add_argument("--timeout", type=positive, default=3600)
     args = parser.parse_args(argv)
+    select_operator(args.operator)
     if args.summarize:
+        if (args.summarize/"report.json").is_file():
+            select_operator(read_json(args.summarize/"report.json").get("operator", args.operator))
         return summarize(args.summarize, args.branches_only)
     if args.branches_only:
         parser.error("--branches-only requires --summarize")

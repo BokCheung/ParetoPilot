@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 from .build import build_candidate, op_names
-from .official import enabled as official_enabled, batch_enabled, read_effective_tiling
+from .official import enabled as official_enabled, batch_enabled, primary_source, add_enabled, source_operator, read_effective_tiling
 from .profiling import read_profile, discover_matmul, inspect_profiles
 from .routing import same_operator
 from .roofline import analyze
@@ -41,18 +41,21 @@ class AscendBackend:
         env, build = environment(), None
         if role in ("candidate", "source_baseline"):
             key = digest(params)
-            if batch_enabled(self.c) and key in self.source_builds:
+            if primary_source(self.c) and key in self.source_builds:
                 build = deepcopy(self.source_builds[key])
                 if tree_hash(build["opp_path"]) != build["installed_sha256"]:
                     raise TuningError("Cached BatchMatMulV3 source package changed")
                 write_json(directory/"reused_build.json", build)
             else:
                 build = build_candidate(self.c, params, directory, env)
-                if batch_enabled(self.c):
+                if primary_source(self.c):
                     self.source_builds[key] = deepcopy(build)
             env = environment(build["opp_path"])
             if build.get("parameter_binding") == "atc_process_environment":
-                from .official_cache import runtime_environment
+                if add_enabled(self.c):
+                    from .official_add import runtime_environment
+                else:
+                    from .official_cache import runtime_environment
                 env.update(runtime_environment(params))
             self.candidate_graph(directory/"model.onnx")
         else:
@@ -62,7 +65,7 @@ class AscendBackend:
         atc = [self.c["ascend"].get("atc", "atc"), "--framework=5", "--model="+str(directory/"model.onnx"),
                "--output="+str(directory/"model"), "--soc_version="+self.c["ascend"]["soc_version"], "--input_shape="+shapes,
                "--input_format=ND", "--log=info"] + self.c["ascend"].get("atc_extra", [])
-        if batch_enabled(self.c):
+        if primary_source(self.c):
             env = env.copy()
             for name, key in (("compiler_cache", "ASCEND_CACHE_PATH"), ("compiler_work", "ASCEND_WORK_PATH")):
                 path = directory/name
@@ -102,8 +105,8 @@ class AscendBackend:
                 expected = getattr(self, "baseline_identity", {}).get("Op Type")
                 if not expected or metrics["operator_identity"].get("Op Type") != expected:
                     raise TuningError("Candidate profiling operator differs from the measured baseline")
-        if batch_enabled(self.c):
-            expected = "BatchMatMulV2" if role == "baseline" else "BatchMatMulV3"
+        if primary_source(self.c):
+            expected = ("Add" if add_enabled(self.c) else "BatchMatMulV2") if role == "baseline" else source_operator(self.c)
             if not (role == "baseline" and auto_reference) and metrics["operator_identity"].get("Op Type") != expected:
                 raise TuningError(f"Expected {expected} for {role}; inspect profile_inventory.json")
         return {"status": "ok", "mode": "ascend", "execution": "om", "timing_method": "task_duration_us", **metrics, "correctness": runtime["correctness"], "om_sha256": om_hash,

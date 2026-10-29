@@ -13,7 +13,7 @@ from .workload import baseline_only as baseline_config
 from .routing import same_operator, route, check_identity
 from .space import enumerate_space, legal
 from . import domains, tuning_cache
-from .official import enabled as official_enabled, batch_enabled, default_params
+from .official import enabled as official_enabled, primary_source as batch_enabled, add_enabled, source_operator, default_params
 from .util import TuningError, digest, file_hash, tree_hash, write_json, read_json
 
 
@@ -102,7 +102,8 @@ def confirmation(config, winner, backend, root):
                               "official source defaults beat stock; tuning gain not established" if selected == "source_baseline" else
                               "no official source configuration establishes a gain over stock"))
     if batch_enabled(config):
-        keys = ("used_core_num", "base_m", "base_n", "base_k", "tiling_key", "block_dim", "multi_batch", "load_mode")
+        keys = ("used_core_num", "base_m", "base_n", "base_k", "tiling_key", "block_dim", "multi_batch", "load_mode",
+                "tile_data_num", "small_core_data_num", "big_core_data_num", "small_tiles", "big_tiles", "tail_block_num")
         def signature(t):
             records = t.get("selection", {}).get("effective_tiling", [])
             return frozenset((tuple(r.get(k) for k in keys),
@@ -117,8 +118,8 @@ def confirmation(config, winner, backend, root):
                       selected="candidate" if tuned else "source_baseline",
                       primary_baseline="source_baseline", primary_baseline_us=sm, primary_speedup=sm/cm,
                       stock_reference_us=bm, stock_speedup=bm/cm, effective_tiling_changed=bool(changed),
-                      reason="Host tiling gain over default BatchMatMulV3 exceeds threshold/noise" if tuned else
-                             "Default BatchMatMulV3 retained; distinct effective tiling and gain not both established")
+                      reason=f"Host tiling gain over default {source_operator(config)} exceeds threshold/noise" if tuned else
+                             f"Default {source_operator(config)} retained; distinct effective tiling and gain not both established")
     return result
 
 
@@ -162,14 +163,15 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
         if smoke and batch_enabled(config) and not baseline_only:
             source = evaluate(backend, config, default_params(config), root/"source_baseline", "source_baseline")
             if source["status"] != "ok":
-                raise TuningError(f"BatchMatMulV3 smoke failed: {source['error']}")
-            config = domains.prepare(config, source, root, manifest)
+                raise TuningError(f"{source_operator(config)} smoke failed: {source['error']}")
+            if not add_enabled(config):
+                config = domains.prepare(config, source, root, manifest)
             tile_trial = None
-            tile_params = next((p for p in enumerate_space(config) if p.get("base_m", 0)), None)
+            tile_params = next((p for p in enumerate_space(config) if (p != default_params(config) if add_enabled(config) else p.get("base_m", 0))), None)
             if tile_params is not None:
                 tile_trial = evaluate(backend, config, tile_params, root/"tile_smoke", "candidate")
                 if tile_trial["status"] != "ok":
-                    raise TuningError(f"Explicit baseM/baseN smoke failed: {tile_trial['error']}")
+                    raise TuningError(f"Source tiling smoke failed: {tile_trial['error']}")
             result = {"mode": config["backend"], "status": "smoke_passed", "scope": "source_smoke",
                       "primary_baseline": "source_baseline", "source_baseline": source,
                       "selected": "source_baseline", "tuning_accepted": False,
@@ -187,8 +189,8 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
         if batch_enabled(config):
             source_baseline = evaluate(backend, config, default_params(config), root/"source_baseline", "source_baseline")
             if source_baseline["status"] != "ok":
-                raise TuningError(f"BatchMatMulV3 source baseline failed: {source_baseline['error']}")
-            write_json(root/"reference-policy.json", {"primary_baseline": "source_baseline", "primary_operator": "BatchMatMulV3",
+                raise TuningError(f"{source_operator(config)} source baseline failed: {source_baseline['error']}")
+                write_json(root/"reference-policy.json", {"primary_baseline": "source_baseline", "primary_operator": source_operator(config),
                        "stock_reference_operator": baseline.get("operator_identity", {}).get("Op Type"), "stock_is_selection_candidate": False})
             if baseline_only:
                 write_json(root/"baseline_summary.json", source_baseline)
@@ -196,7 +198,8 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
                 write_baseline_report(root, config, source_baseline)
                 return {"mode": config["backend"], "primary_baseline": "source_baseline", "baseline_us": source_baseline["duration_us"],
                         "stock_reference_us": baseline["duration_us"], "report": str(root/"report.html")}
-            config = domains.prepare(config, source_baseline, root, manifest)
+            if not add_enabled(config):
+                config = domains.prepare(config, source_baseline, root, manifest)
         routing = None
         if same_operator(config):
             routing = route(config, baseline)
@@ -313,7 +316,7 @@ def run(config, output, progress=None, baseline_only=False, smoke=False):
         write_report(root, result)
         summary = {"mode": result["mode"], "selected": result["selected"], "evaluations": len(history), "successful_candidates": len(ranked), "accepted": final["accepted"], "report": str(root/"report.html")}
         if batch_enabled(config):
-            summary.update(primary_baseline="BatchMatMulV3 source defaults", stock_reference=baseline.get("operator_identity", {}).get("Op Type"),
+            summary.update(primary_baseline=source_operator(config)+" source defaults", stock_reference=baseline.get("operator_identity", {}).get("Op Type"),
                            reason=final["reason"])
         return summary
     finally:

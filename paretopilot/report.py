@@ -51,6 +51,7 @@ def roofline_svg(config, baseline, trials):
 
 
 def write_report(root, result):
+    from .official import add_enabled
     from .util import read_json
     config = read_json(root/"manifest.json")["config"]
     primary = result.get("primary_baseline") == "source_baseline"
@@ -92,7 +93,8 @@ Confirmation compares interleaved fresh baseline/candidate builds. The range thr
     if "source_baseline" in result:
         final = result["confirmation"]
         source_operator = result["source_baseline"]["selection"].get("operator", "MatMulV3")
-        text += (f"\nOfficial source: CANN ops-nn 8.5.0, {source_operator}; commit {result['source_baseline']['selection']['commit']}.\n"
+        source_repo = "ops-math 8.5.0 experimental community contribution" if add_enabled(config) else "ops-nn 8.5.0"
+        text += (f"\nOfficial source: CANN {source_repo}, {source_operator}; commit {result['source_baseline']['selection']['commit']}.\n"
                  "\nThe installed stock baseline and this source build are different implementations.\n"
                  "\nConfirmation task medians (us), not build/stage wall-clock seconds:\n\n"
                  f"- Stock CANN: {final.get('baseline_us', 'unavailable')}\n"
@@ -106,7 +108,7 @@ Confirmation compares interleaved fresh baseline/candidate builds. The range thr
     if result.get("primary_baseline") == "source_baseline":
         final = result["confirmation"]
         stock_type = result["baseline"].get("operator_identity", {}).get("Op Type", "MatMul")
-        text += ("\nPrimary optimization baseline: default BatchMatMulV3 from the same pinned source. "
+        text += (f"\nPrimary optimization baseline: default {source_operator} from the same pinned source. "
                  f"Stock {stock_type} is a performance reference only and does not gate acceptance or become the selected source implementation.\n"
                  f"\nPrimary V3 baseline: {final.get('primary_baseline_us', result['source_baseline']['duration_us'])} us; "
                  f"V3 tuning speedup: {final.get('primary_speedup', 'unavailable')}x.\n"
@@ -115,6 +117,11 @@ Confirmation compares interleaved fresh baseline/candidate builds. The range thr
                  "base_m/base_n=0 retain automatic tiles; explicit pairs use SetFixSplit(M,N,-1) with heuristic/common policy. "
                  "baseK remains automatic. "
                  "No tile dimensions are overwritten after dependency calculation.\n")
+        if add_enabled(config):
+            start = text.index("\nHost controls:")
+            text = text[:start] + "\nHost controls: core_limit=0 and tile_elems=0 preserve upstream AddV2 defaults. Constraints enter before official partition/loop/tail calculation. Device code is unchanged.\n"
+            text = text.replace("Primary V3 baseline", "Primary AddV2 baseline").replace("V3 tuning speedup", "AddV2 tuning speedup")
+            text = text.replace("Default core_limit=0 preserves device core count; tiling_policy=0 preserves upstream knowledge-bank lookup with heuristic fallback.", "Default AddV2 keeps upstream vector-core count and UB-derived tiling.")
     if "domain" in result:
         domain, cache = result["domain"], result.get("result_cache", {})
         text += (f"\nShape-generated domains: {domain['legal_candidates']} legal candidates; "

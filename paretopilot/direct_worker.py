@@ -12,7 +12,7 @@ import time
 import traceback
 
 from .direct_build import select_kernel
-from .official import read_effective_tiling, validate_params
+from .official import read_effective_tiling, validate_params, add_enabled, source_operator
 from .official_cache import runtime_environment
 from .util import TuningError, digest, file_hash, read_json, write_json
 from .worker import check_outputs
@@ -90,12 +90,12 @@ def recent_error(lib):
         return ""
 
 
-def decode_tiling(info):
+def decode_tiling(info, max_blocks=24):
     try:
         data = bytes.fromhex(info["tiling_data"])
         block, key = info["block_dim"], info["tiling_key"]
         workspace = info["workspaces"]
-        if (not data or len(data) > 1024*1024 or type(block) is not int or not 1 <= block <= 24
+        if (not data or len(data) > 1024*1024 or type(block) is not int or not 1 <= block <= max_blocks
                 or type(key) is not int or not 0 <= key < 2**64
                 or not isinstance(workspace, list) or len(workspace) != 1
                 or type(workspace[0]) is not int or not 0 <= workspace[0] <= 2**34
@@ -232,7 +232,11 @@ class Runtime:
         return ptr
 
     def host_tiling(self, params, directory):
-        os.environ.update(runtime_environment(params))
+        if add_enabled(self.c):
+            from .official_add import runtime_environment as add_environment
+            os.environ.update(add_environment(params))
+        else:
+            os.environ.update(runtime_environment(params))
         def desc(array):
             return {"shape": list(array.shape), "ori_shape": list(array.shape),
                     "format": "ND", "ori_format": "ND", "dtype": "float16"}
@@ -244,16 +248,19 @@ class Runtime:
         attrs = [{"name": name, "dtype": kind, "value": value} for name, kind, value in
                  (("adj_x1", "bool", False), ("adj_x2", "bool", False),
                   ("offset_x", "int64", 0), ("enable_hf32", "bool", False))]
-        args = [b"BatchMatMulV3", json.dumps(compile_info).encode(), digest(compile_info).encode(),
-                json.dumps([*(desc(a) for a in self.inputs), None, None]).encode(),
+        if add_enabled(self.c):
+            attrs = []
+        inputs = [desc(a) for a in self.inputs] + ([] if add_enabled(self.c) else [None, None])
+        args = [source_operator(self.c).encode(), json.dumps(compile_info).encode(), digest(compile_info).encode(),
+                json.dumps(inputs).encode(),
                 json.dumps([desc(self.reference)]).encode(), json.dumps(attrs).encode()]
         write_json(directory/"host_tiling_request.json", {"compile_info": compile_info,
                    "inputs": json.loads(args[3]), "outputs": json.loads(args[4]), "attrs": attrs})
         buffer, elapsed = C.create_string_buffer(4*1024*1024), (C.c_uint64*2)()
         with capture_native(directory/"host_tiling.log"):
-            print("Calling OpTilingForCompile: BatchMatMulV3; params="+digest(params), flush=True)
+            print("Calling OpTilingForCompile: "+source_operator(self.c)+"; params="+digest(params), flush=True)
             ret = self.tiling(*args, buffer, len(buffer), elapsed,
-                              b'{"op_name":"paretopilot_BatchMatMulV3"}')
+                              json.dumps({"op_name": "paretopilot_"+source_operator(self.c)}).encode())
             error = recent_error(self.lib) if ret != 1 else ""
             print(f"OpTilingForCompile returned {ret}; output_bytes={len(buffer.value)}", flush=True)
             if error:
@@ -325,7 +332,10 @@ class Runtime:
         directory, params = Path(request["directory"]), request["params"]
         validate_params(params, batch=True)
         info, effective = self.host_tiling(params, directory)
-        data, block, key, workspace_size = decode_tiling(info)
+        data, block, key, workspace_size = decode_tiling(info, 48 if add_enabled(self.c) else 24)
+        if add_enabled(self.c):
+            from .official_add import validate_tiling_bytes
+            validate_tiling_bytes(info, effective, self.c["operator"]["numel"])
         if any(r["tiling_key"] != key or r["block_dim"] != block for r in effective):
             raise TuningError("Host tiling bytes and observed key/blockDim disagree")
         kernel = select_kernel(self.build["kernel_catalogs"], key)
@@ -352,7 +362,8 @@ class Runtime:
                 # after submission. Preparation is outside the timed interval.
                 args, param = P(), P()
                 self.call("aclrtKernelArgsInit", function, C.byref(args))
-                for pointer in (*self.pointers, P(), P(), self.output, workspace, tiling):
+                pointers = [*self.pointers, *([] if add_enabled(self.c) else [P(), P()]), self.output, workspace, tiling]
+                for pointer in pointers:
                     self.call("aclrtKernelArgsAppend", args, C.byref(pointer), C.sizeof(P), C.byref(param))
                 self.call("aclrtKernelArgsFinalize", args)
                 if timed:
@@ -391,7 +402,7 @@ class Runtime:
                 "duration_us": statistics.median(samples), "samples_us": samples, "measured_bytes": None,
                 "timing_method": "device_event_us", "correctness": correctness,
                 "input_shapes": [list(a.shape) for a in self.inputs], "output_shape": list(self.reference.shape),
-                "operator_identity": {"Op Type": "BatchMatMulV3", "Op Name": kernel["entry"], "evidence": "compiled_kernel_metadata"},
+                "operator_identity": {"Op Type": source_operator(self.c), "Op Name": kernel["entry"], "evidence": "compiled_kernel_metadata"},
                 "selection": {**self.build, "params": params, "params_sha256": digest(params),
                               "platform_info": self.platform_info,
                               "effective_tiling": effective, "kernel": kernel, "tiling_sha256": file_hash(directory/"host_tiling.json")},

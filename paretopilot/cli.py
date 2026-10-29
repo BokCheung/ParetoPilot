@@ -8,7 +8,7 @@ from .doctor import inspect_environment
 from .package import create_package
 from .profiling import inspect_profiles, read_profile
 from .roofline import analyze
-from .official import enabled as official_enabled, batch_enabled, default_params
+from .official import enabled as official_enabled, batch_enabled, primary_source, add_enabled, default_params
 from .search import run
 from .space import enumerate_space
 from .workload import baseline_only
@@ -72,7 +72,7 @@ def main(argv=None):
                 if args.fresh_search:
                     c["search"]["reuse_results"] = False
                 if args.execution:
-                    if args.execution == "kernel" and (not batch_enabled(c)
+                    if args.execution == "kernel" and (not primary_source(c)
                                                        or not c["implementation"].get("build_cache", True)):
                         raise TuningError("--execution kernel requires BatchMatMulV3 and build_cache=true")
                     c["implementation"]["execution"] = args.execution
@@ -81,7 +81,7 @@ def main(argv=None):
                 if args.smoke:
                     c["search"].update(population=2, generations=1, budget=1)
                     c["measurement"]["confirmation_rounds"] = 2
-                    if official_enabled(c):
+                    if official_enabled(c) and not add_enabled(c):
                         c["space"] = {k: [v] for k, v in default_params(c).items()}
                 if c["backend"] == "ascend" and not sys.platform.startswith("linux"):
                     raise TuningError("Ascend backend requires the Linux 910B/CANN test machine; use simulation here")
