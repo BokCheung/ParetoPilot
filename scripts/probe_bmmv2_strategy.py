@@ -46,7 +46,7 @@ def main(argv=None):
         write_json(root/"config.json", config)
         config = load_config(root/"config.json")
         print(f"Probe output: {root}", flush=True)
-        cann, script, versions = resolve_cann(args.cann_path, args.cann_env)
+        cann, script, versions = resolve_cann(args.cann_path, args.cann_env, config["ascend"]["cann_version"])
         os.environ.update(source_environment(cann, script, root/"cann-env.log"))
         write_json(root/"cann.json", {"root": str(cann), "versions": versions})
         result = run_probe(config, root)

@@ -320,6 +320,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--operator", choices=("BatchMatMulV2", "Add"), default="BatchMatMulV2")
     parser.add_argument("--cann-path", type=Path)
+    parser.add_argument("--cann-version", choices=("8.5.0", "8.1.RC1"), default="8.5.0")
     parser.add_argument("--cann-env", type=Path)
     parser.add_argument("--baseline-dir", type=Path, help="Existing stock baseline/ with atc.command.json")
     parser.add_argument("--summarize", type=Path, metavar="DIAGNOSTIC_DIR", help="Read an existing report without rerunning ATC")
@@ -354,7 +355,7 @@ def main(argv=None):
                          "effective_uid": getattr(os, "geteuid", lambda: None)()}}
     code = 0
     try:
-        cann, script, versions = resolve_cann(args.cann_path, args.cann_env)
+        cann, script, versions = resolve_cann(args.cann_path, args.cann_env, args.cann_version)
         env = source_environment(cann, script, output/"cann-env.log")
         report["python"]["path_python3"] = shutil.which("python3", path=env.get("PATH"))
         report["cann"] = {"root": str(cann), "versions": versions}

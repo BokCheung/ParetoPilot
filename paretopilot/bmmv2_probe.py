@@ -18,7 +18,10 @@ def installed_source():
     opp = os.environ.get("ASCEND_OPP_PATH")
     if not opp:
         raise TuningError("ASCEND_OPP_PATH is missing; source the CANN environment")
-    source = Path(opp)/"built-in/op_impl/ai_core/tbe/impl/ops_legacy/dynamic/batch_matmul_v2.py"
+    impl = Path(opp)/"built-in/op_impl/ai_core/tbe/impl"
+    source = impl/"ops_legacy/dynamic/batch_matmul_v2.py"
+    if not source.is_file():
+        source = impl/"dynamic/batch_matmul_v2.py"
     if not source.is_file():
         raise TuningError(f"Audited installed V2 wrapper not found: {source}")
     return source.resolve()

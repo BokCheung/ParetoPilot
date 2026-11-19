@@ -8,6 +8,8 @@ class AddKernel {
     TQue<QuePosition::VECOUT, PP_BUFFERS> qc;
     GlobalTensor<half> a, b, c;
 public:
+    __aicore__ inline AddKernel() {}
+
     __aicore__ inline void Run(GM_ADDR x, GM_ADDR y, GM_ADDR z, uint32_t length) {
         a.SetGlobalBuffer((__gm__ half*)x, length);
         b.SetGlobalBuffer((__gm__ half*)y, length);

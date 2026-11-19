@@ -71,7 +71,14 @@ class AscendBackend:
                 path = directory/name
                 path.mkdir()
                 env[key] = str(path)
-        self.command(atc, directory, "atc", env)
+        compile_env = env
+        stock_add = role == "baseline" and "stock_add_tiling" in self.c["ascend"]
+        if stock_add:
+            from .stock_add_81 import compiler_environment
+            compile_env = compiler_environment(self.c, directory, env)
+        self.command(atc, directory, "atc", compile_env)
+        if stock_add and not (directory/"stock-add-tiling.jsonl").is_file():
+            raise TuningError("ATC produced no evidence of applying the requested stock Add tiling")
         om = directory/"model.om"
         om_hash = file_hash(om)
         if role in ("candidate", "source_baseline"):

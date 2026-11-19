@@ -63,7 +63,7 @@ def inspect_environment(config):
     if versions:
         add("cann_version", any(a["cann_version"] in value for value in versions.values()), versions)
     else:
-        add("cann_version", False, "Cannot verify CANN version; source set_env.sh and set ASCEND_HOME_PATH to the 8.5.0 toolkit root")
+        add("cann_version", False, f"Cannot verify CANN version; source set_env.sh and set ASCEND_HOME_PATH to the {a['cann_version']} toolkit root")
     info = "npu-smi not found"
     if shutil.which("npu-smi"):
         try:

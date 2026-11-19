@@ -138,6 +138,9 @@ def load_config(path):
                 raise TuningError("Missing Agent Python module")
         if c["backend"] == "ascend":
             a = c["ascend"]
+            if "stock_add_tiling" in a:
+                from .stock_add_81 import validate as validate_stock_add
+                validate_stock_add(c, a["stock_add_tiling"])
             for key in ("soc_version", "cann_version", "source_tag"):
                 if not isinstance(a[key], str) or not a[key] or "REPLACE" in a[key]:
                     raise TuningError(f"Set ascend.{key} for the target machine")
@@ -160,8 +163,12 @@ def load_config(path):
                 raise TuningError("Bundled 910B kernels currently support float16")
             if op["kind"] == "matmul" and not official and not baseline and (any(op[k] % 16 for k in ("m", "n", "k")) or c["space"]["buffers"] != [1]):
                 raise TuningError("Bundled MatMul requires M/N/K multiples of 16 and buffers=[1] (CANN owns internal buffers)")
-            if not a["soc_version"].startswith("Ascend910B") or not a["cann_version"].startswith("8.5.0"):
-                raise TuningError("Bundled kernels target Ascend910B and CANN 8.5.0")
+            cann81_supported = baseline or implementation["kind"] == "bundled"
+            cann_supported = a["cann_version"].startswith("8.5.0") or (
+                cann81_supported and a["cann_version"] == "8.1.RC1"
+            )
+            if not a["soc_version"].startswith("Ascend910B") or not cann_supported:
+                raise TuningError("Expected Ascend910B with CANN 8.5.0, or 8.1.RC1 for stock MatMul and bundled kernels")
     except (KeyError, TypeError, AttributeError) as exc:
         raise TuningError(f"Invalid configuration: {exc}") from exc
     return c

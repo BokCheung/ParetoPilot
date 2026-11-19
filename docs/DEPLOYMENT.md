@@ -196,6 +196,48 @@ python3 scripts/test_910b.py --cann-path /usr/local/Ascend/cann-8.5.0 --soc Asce
 本地验证不包含昇腾编译、实际 OPP 装载、设备正确性和加速收益。保留首次真机 smoke 的完整目录，可直接定位失败阶段，不需要 Agent 服务。
 
 
+## 在 zhangbo_bluezone 上开发（910B3 / CANN 8.1.RC1）
+
+通过 VS Code Remote SSH 连接 `zhangbo_bluezone`，打开 `/home/ma-user/work/ParetoPilot`。
+在该目录用现有的工具链和 PyTorch 环境运行内置 MatMul 基线：
+
+```bash
+cd /home/ma-user/work/ParetoPilot
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+PYTHON=/home/ma-user/anaconda3/envs/PyTorch-2.5.1/bin/python3
+mkdir -p runs
+run=$(mktemp -d runs/cann81-matmul.XXXXXX)
+"$PYTHON" -m paretopilot baseline --config examples/ascend910b3_cann81_matmul.json --output "$run"
+"$PYTHON" -m unittest discover -s tests -v
+```
+
+MatMul 基线检查 ONNX 导出、ATC 编译、NPU 输出精度和目标任务 profiling。
+在同一环境中可复跑两个针对示例 shape 寻优后的内置算子：
+
+```bash
+for op in add matmul; do
+    run=$(mktemp -d "runs/cann81-stock-${op}.XXXXXX")
+    "$PYTHON" -m paretopilot baseline --config "examples/ascend910b3_cann81_${op}_stock_tuned.json" --output "$run" || break
+done
+```
+
+MatMul 使用 `--aicore_num=4` 编译内置 BatchMatMulV2。Add 在 ATC 子进程中调整已安装的 TBE 常量形状调度，
+对输入长度 1048593 使用每个 block 65552 个元素、每个 UB tile 8192 个元素和双缓冲。
+编译前检查 8.1.RC1 调度源码哈希，实际采用的参数写入 `baseline/stock-add-tiling.jsonl`。
+自定义 PpAdd 在相同输入长度的参数搜索结果保存在 `examples/ascend910b3_cann81_pp_add_tuned.json`，
+可用下方 Add 烟测命令替换配置文件复测。
+使用同一个环境，可以对自定义 `PpAdd` 和二维 `PpMatmul` 各测一个候选并做两轮交错复测：
+
+```bash
+run=$(mktemp -d runs/cann81-add.XXXXXX)
+"$PYTHON" -m paretopilot run --smoke --config examples/ascend910b3_cann81_add.json --output "$run"
+run=$(mktemp -d runs/cann81-pp-matmul.XXXXXX)
+"$PYTHON" -m paretopilot run --smoke --config examples/ascend910b3_cann81_pp_matmul.json --output "$run"
+```
+
+去掉 `--smoke` 可搜索示例配置中的参数域。`PpMatmul` 与内置 `BatchMatMulV2` 的性能比较包含实现差异。
+默认 BatchMatMulV3 源码调优和 `scripts/test_910b.py` 验收仍要求 CANN 8.5.0。
+
 ## 3D MatMul baseline cases (legacy)
 
 These instructions require `--matmul-implementation legacy`. For the current source-baseline route, see [BatchMatMulV3](OFFICIAL_BATCHMATMUL.md).

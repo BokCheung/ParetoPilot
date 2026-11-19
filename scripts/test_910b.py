@@ -64,7 +64,7 @@ def parser():
     return p
 
 
-def resolve_cann(path, env_script=None):
+def resolve_cann(path, env_script=None, version="8.5.0"):
     supplied = path.expanduser().resolve()
     if not supplied.is_dir():
         raise TuningError(f"CANN directory not found: {supplied}")
@@ -77,8 +77,9 @@ def resolve_cann(path, env_script=None):
         raise TuningError("Cannot find set_env.sh; pass --cann-env /actual/path/set_env.sh")
     files = [root/"version.info", *root.glob("*/ascend_toolkit_install.info")]
     versions = {str(p): p.read_text(errors="replace") for p in files if p.is_file()}
-    if not any(re.search(r"(?im)^\s*version\s*[:=]\s*8\.5\.0\s*$", text) for text in versions.values()):
-        raise TuningError(f"CANN root must contain an installed 8.5.0 version record: {root}")
+    pattern = rf"(?im)^\s*version\s*[:=]\s*{re.escape(version)}\s*$"
+    if not any(re.search(pattern, text) for text in versions.values()):
+        raise TuningError(f"CANN root must contain an installed {version} version record: {root}")
     return root, script, versions
 
 
